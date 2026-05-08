@@ -341,15 +341,98 @@ action.prev = function()
     advance(-1, ctx)
 end
 
----@param n_lines? integer Number of lines to accept from the suggestion. If nil, accepts all lines.
+-- Insert the first n_chars of the current suggestion. ctx is NOT reset when
+-- there is remaining text so that CursorMovedI/update_suggestion_on_typing can
+-- strip the accepted prefix and display the remainder as virtual text.
+local function accept_n_chars(n_chars)
+    local ctx = get_ctx()
+    local suggestion = get_current_suggestion(ctx)
+    if not suggestion or #suggestion == 0 then
+        return
+    end
+
+    local to_insert = n_chars and suggestion:sub(1, n_chars) or suggestion
+    local has_remaining = n_chars ~= nil and #suggestion > n_chars
+
+    if not has_remaining then
+        reset_ctx(ctx)
+    end
+
+    clear_preview()
+
+    local cursor = api.nvim_win_get_cursor(0)
+    local line, col = cursor[1] - 1, cursor[2]
+
+    if vim.fn.pumvisible() == 1 then
+        api.nvim_feedkeys(api.nvim_replace_termcodes('<C-e>', true, true, true), 'n', true)
+    end
+
+    vim.schedule(function()
+        local lines = vim.split(to_insert, '\n')
+        api.nvim_buf_set_text(0, line, col, line, col, lines)
+        local new_col = #lines[#lines]
+        if #lines == 1 then
+            new_col = new_col + col
+        end
+        api.nvim_win_set_cursor(0, { line + #lines, new_col })
+    end)
+end
+
+-- Returns the byte length of the next "word unit" in s: optional leading
+-- whitespace followed by either a run of word chars (\w) or a single
+-- non-word char. Returns nil when s is empty.
+local function next_word_end(s)
+    if #s == 0 then
+        return nil
+    end
+    local i = 1
+    while i <= #s and s:sub(i, i):match '%s' do
+        i = i + 1
+    end
+    if i > #s then
+        return #s
+    end
+    if s:sub(i, i):match '%w' then
+        while i <= #s and s:sub(i, i):match '%w' do
+            i = i + 1
+        end
+    else
+        i = i + 1
+    end
+    return i - 1
+end
+
+-- Returns the byte index of the end of the nth word unit in s.
+local function find_nth_word_end(s, n)
+    local pos = 0
+    for _ = 1, n do
+        local len = next_word_end(s:sub(pos + 1))
+        if not len then
+            return nil
+        end
+        pos = pos + len
+    end
+    return pos
+end
+
+---@param n_lines? integer Number of lines to accept. If both params are nil, accepts all.
+---@param n_words? integer Number of word units to accept. Takes precedence over n_lines.
 ---Accepts the current suggestion by inserting it at the cursor position.
----If n_lines is provided, only the first n_lines of the suggestion are inserted.
 ---After insertion, moves the cursor to the end of the inserted text.
-function action.accept(n_lines)
+function action.accept(n_lines, n_words)
     local ctx = get_ctx()
 
     local suggestion = get_current_suggestion(ctx)
     if not suggestion then
+        return
+    end
+
+    if n_words then
+        local n = find_nth_word_end(suggestion, n_words)
+        if not n then
+            return
+        end
+        accept_n_chars(n)
         return
     end
 
@@ -399,6 +482,36 @@ function action.accept(n_lines)
         end
         api.nvim_win_set_cursor(0, { line + #suggestions, new_col })
     end)
+end
+
+function action.accept_word()
+    action.accept(nil, 1)
+end
+
+-- Like vim's f{char}: accept the suggestion up to and including the next
+-- occurrence of the prompted character.
+function action.accept_until_char()
+    local ctx = get_ctx()
+    local suggestion = get_current_suggestion(ctx)
+    if not suggestion or #suggestion == 0 then
+        return
+    end
+
+    -- FIXME: getcharstr() may move the cursor; restore it afterwards.
+    local cursor_pos = api.nvim_win_get_cursor(0)
+    local char = vim.fn.getcharstr()
+    api.nvim_win_set_cursor(0, cursor_pos)
+
+    if not char or char == '' then
+        return
+    end
+
+    local idx = suggestion:find(char, 1, true)
+    if not idx then
+        return
+    end
+
+    accept_n_chars(idx)
 end
 
 function action.accept_n_lines()
@@ -571,6 +684,20 @@ local function set_keymaps(keymap)
     if keymap.accept_n_lines then
         vim.keymap.set('i', keymap.accept_n_lines, action.accept_n_lines, {
             desc = '[minuet.virtualtext] accept suggestion (n lines)',
+            silent = true,
+        })
+    end
+
+    if keymap.accept_word then
+        vim.keymap.set('i', keymap.accept_word, action.accept_word, {
+            desc = '[minuet.virtualtext] accept next word',
+            silent = true,
+        })
+    end
+
+    if keymap.accept_until_char then
+        vim.keymap.set('i', keymap.accept_until_char, action.accept_until_char, {
+            desc = '[minuet.virtualtext] accept until char (f-like)',
             silent = true,
         })
     end

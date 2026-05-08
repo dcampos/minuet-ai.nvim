@@ -230,6 +230,10 @@ local M = {
             accept_line = nil,
             -- accept n lines (prompts for number)
             accept_n_lines = nil,
+            -- accept next word (word chars) or single non-word char
+            accept_word = nil,
+            -- accept up to and including the next occurrence of a prompted char (like vim's f)
+            accept_until_char = nil,
             -- Cycle to next completion item, or manually invoke completion
             next = nil,
             -- Cycle to prev completion item, or manually invoke completion
