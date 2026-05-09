@@ -233,18 +233,25 @@ local function update_suggestion_on_typing(ctx)
     return true
 end
 
-local function trigger(bufnr)
+---@param bufnr integer
+---@param overrides? table Optional partial config patch, deep-merged onto the
+---live config for this single request (no global mutation). Use to fire with a
+---different provider/model/stop tokens without `change_model`/`change_provider`.
+local function trigger(bufnr, overrides)
     if bufnr ~= api.nvim_get_current_buf() or vim.fn.mode() ~= 'i' then
         return
     end
 
     utils.notify('Minuet virtual text started', 'verbose')
 
-    local config = require('minuet').config
+    local cfg = require('minuet').config
+    if overrides then
+        cfg = vim.tbl_deep_extend('force', cfg, overrides)
+    end
 
-    local context = utils.get_context(utils.make_cmp_context())
+    local context = utils.get_context(utils.make_cmp_context(), cfg)
 
-    local provider = require('minuet.backends.' .. config.provider)
+    local provider = require('minuet.backends.' .. cfg.provider)
     local timestamp = uv.now()
     internal.current_completion_timestamp = timestamp
 
@@ -269,7 +276,7 @@ local function trigger(bufnr)
         end
 
         update_preview(ctx)
-    end)
+    end, cfg)
 end
 
 local function advance(count, ctx)
@@ -317,24 +324,36 @@ end
 
 local action = {}
 
-action.next = function()
+---@param overrides? table Partial config patch, deep-merged onto the live
+---config for this single request only. No global mutation. Useful for
+---one-off completions with a different provider/model/stop tokens.
+---Bypasses auto-trigger gating (debounce/throttle/predicates).
+function action.fire(overrides)
+    trigger(api.nvim_get_current_buf(), overrides)
+end
+
+---@param overrides? table Optional config patch. Only used when no suggestion
+---request has fired yet — when fresh suggestions must be requested. Once
+---suggestions exist, calling next/prev cycles through them and overrides are
+---ignored (the cached suggestions are reused).
+action.next = function(overrides)
     local ctx = get_ctx()
 
     -- no suggestion request yet
     if not ctx.suggestions then
-        trigger(api.nvim_get_current_buf())
+        trigger(api.nvim_get_current_buf(), overrides)
         return
     end
 
     advance(1, ctx)
 end
 
-action.prev = function()
+action.prev = function(overrides)
     local ctx = get_ctx()
 
     -- no suggestion request yet
     if not ctx.suggestions then
-        trigger(api.nvim_get_current_buf())
+        trigger(api.nvim_get_current_buf(), overrides)
         return
     end
 
@@ -497,11 +516,7 @@ function action.accept_until_char()
         return
     end
 
-    -- FIXME: getcharstr() may move the cursor; restore it afterwards.
-    local cursor_pos = api.nvim_win_get_cursor(0)
     local char = vim.fn.getcharstr()
-    api.nvim_win_set_cursor(0, cursor_pos)
-
     if not char or char == '' then
         return
     end

@@ -38,8 +38,12 @@ function M.get_text_fn(json)
     return json.choices[1].text
 end
 
-M.complete = function(context, callback)
-    local config = require('minuet').config
+---@param context table
+---@param callback function
+---@param cfg? table Effective config (defaults to global). Pass to override
+---provider_options.openai_fim_compatible per call.
+M.complete = function(context, callback, cfg)
+    local config = cfg or require('minuet').config
     local options = vim.deepcopy(config.provider_options.openai_fim_compatible)
 
     local get_text_fn = M.get_text_fn
@@ -50,7 +54,7 @@ M.complete = function(context, callback)
         get_text_fn = options.get_text_fn.no_stream
     end
 
-    base.complete_openai_fim_base(options, get_text_fn, context, callback)
+    base.complete_openai_fim_base(options, get_text_fn, context, callback, config)
 end
 
 return M

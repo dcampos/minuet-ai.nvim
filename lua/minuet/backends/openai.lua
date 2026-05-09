@@ -12,12 +12,16 @@ if not M.is_available() then
     utils.notify('OpenAI API key is not set', 'error', vim.log.levels.ERROR)
 end
 
-M.complete = function(context, callback)
-    local config = require('minuet').config
+---@param context table
+---@param callback function
+---@param cfg? table Effective config (defaults to global). Pass to override
+---provider_options.openai (model, max_tokens, optional, ...) per call.
+M.complete = function(context, callback, cfg)
+    local config = cfg or require('minuet').config
     local options = vim.deepcopy(config.provider_options.openai)
     options.name = 'OpenAI'
 
-    base.complete_openai_base(options, context, callback)
+    base.complete_openai_base(options, context, callback, config)
 end
 
 return M

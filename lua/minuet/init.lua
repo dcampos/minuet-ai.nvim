@@ -49,6 +49,39 @@ function M.setup(config)
     require 'minuet.deprecate'
 end
 
+-- Overlay helpers for building config patches to pass to action.fire.
+-- They return plain tables; compose with M.with.merge or vim.tbl_deep_extend.
+M.with = {}
+
+---@param name string
+function M.with.provider(name)
+    return { provider = name }
+end
+
+---@param provider string
+---@param model string
+function M.with.model(provider, model)
+    return { provider_options = { [provider] = { model = model } } }
+end
+
+---@param provider string
+---@param opts table Provider-specific optional payload (max_tokens, stop, ...).
+function M.with.optional(provider, opts)
+    return { provider_options = { [provider] = { optional = opts } } }
+end
+
+---Compose any number of overlay tables left-to-right.
+function M.with.merge(...)
+    local out = {}
+    for i = 1, select('#', ...) do
+        local t = select(i, ...)
+        if t then
+            out = vim.tbl_deep_extend('force', out, t)
+        end
+    end
+    return out
+end
+
 function M.make_cmp_map()
     local cmp = require 'cmp'
     return cmp.mapping(cmp.mapping.complete {

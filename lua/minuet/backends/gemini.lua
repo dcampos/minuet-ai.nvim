@@ -40,8 +40,8 @@ function M.transform_openai_chat_to_gemini_chat(chat)
     return new_chat
 end
 
-local function make_request_data()
-    local config = require('minuet').config
+local function make_request_data(cfg)
+    local config = cfg or require('minuet').config
     local options = vim.deepcopy(config.provider_options.gemini)
 
     local few_shots = utils.get_or_eval_value(options.few_shots)
@@ -64,11 +64,15 @@ local function make_request_data()
     return options, request_data
 end
 
-function M.complete(context, callback)
-    local config = require('minuet').config
+---@param context table
+---@param callback function
+---@param cfg? table Effective config (defaults to global). Pass to override
+---provider_options.gemini per call.
+function M.complete(context, callback, cfg)
+    local config = cfg or require('minuet').config
     common.terminate_all_jobs()
 
-    local options, data = make_request_data()
+    local options, data = make_request_data(config)
 
     local ctx = utils.make_chat_llm_shot(context, options.chat_input)
     ctx = common.create_chat_messages_from_list(ctx)
@@ -95,7 +99,7 @@ function M.complete(context, callback)
         return
     end
 
-    local args = utils.make_curl_args(transformed_data.end_point, transformed_data.headers, data_file)
+    local args = utils.make_curl_args(transformed_data.end_point, transformed_data.headers, data_file, config)
 
     local provider_name = 'Gemini'
     local timestamp = os.time()
@@ -133,7 +137,7 @@ function M.complete(context, callback)
 
             local items = common.parse_completion_items(items_raw, provider_name)
 
-            items = common.filter_context_sequences_in_items(items, context)
+            items = common.filter_context_sequences_in_items(items, context, config)
 
             items = utils.remove_spaces(items)
 

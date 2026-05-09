@@ -246,8 +246,11 @@ end
 ---   - opts: table - Options indicating if context was truncated:
 ---     - is_incomplete_before: boolean - True if content before cursor was truncated
 ---     - is_incomplete_after: boolean - True if content after cursor was truncated
-function M.get_context(cmp_context)
-    local config = require('minuet').config
+---@param cmp_context table
+---@param cfg? table Effective config (defaults to global). Pass an effective
+---config to override values like context_window/context_ratio per call.
+function M.get_context(cmp_context, cfg)
+    local config = cfg or require('minuet').config
 
     local cursor = cmp_context.cursor
     local lines_before_list = vim.api.nvim_buf_get_lines(0, 0, cursor.line, false)
@@ -304,9 +307,10 @@ end
 ---remove the sequence and the rest part from text.
 ---@param text string?
 ---@param context { lines_before: string?, lines_after: string? }
+---@param cfg? table Effective config (defaults to global).
 ---@return string?
-function M.filter_text(text, context)
-    local config = require('minuet').config
+function M.filter_text(text, context, cfg)
+    local config = cfg or require('minuet').config
 
     -- Handle nil values
     if not text or not context then
@@ -676,9 +680,11 @@ end
 ---@param end_point string
 ---@param headers table<string, string>
 ---@param data_file string
+---@param cfg? table Effective config (defaults to global). Honors per-call
+---curl_extra_args, request_timeout and proxy overrides.
 ---@return string[]
-function M.make_curl_args(end_point, headers, data_file)
-    local config = require('minuet').config
+function M.make_curl_args(end_point, headers, data_file, cfg)
+    local config = cfg or require('minuet').config
 
     local args = { '-L' }
     for _, arg in ipairs(config.curl_extra_args) do

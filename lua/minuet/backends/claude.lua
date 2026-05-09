@@ -12,8 +12,8 @@ if not M.is_available() then
     utils.notify('Anthropic API key is not set', 'error', vim.log.levels.ERROR)
 end
 
-local function make_request_data()
-    local config = require('minuet').config
+local function make_request_data(cfg)
+    local config = cfg or require('minuet').config
     local options = vim.deepcopy(config.provider_options.claude)
     local system = utils.make_system_prompt(options.system, config.n_completions)
 
@@ -37,11 +37,15 @@ function M.get_text_fn_stream(json)
     return json.delta.text
 end
 
-M.complete = function(context, callback)
-    local config = require('minuet').config
+---@param context table
+---@param callback function
+---@param cfg? table Effective config (defaults to global). Pass to override
+---provider_options.claude per call.
+M.complete = function(context, callback, cfg)
+    local config = cfg or require('minuet').config
     common.terminate_all_jobs()
 
-    local options, data = make_request_data()
+    local options, data = make_request_data(config)
     local ctx = utils.make_chat_llm_shot(context, options.chat_input)
     ctx = common.create_chat_messages_from_list(ctx)
 
@@ -64,7 +68,7 @@ M.complete = function(context, callback)
         return
     end
 
-    local args = utils.make_curl_args(transformed_data.end_point, transformed_data.headers, data_file)
+    local args = utils.make_curl_args(transformed_data.end_point, transformed_data.headers, data_file, config)
 
     local provider_name = 'Claude'
     local timestamp = os.time()
@@ -103,7 +107,7 @@ M.complete = function(context, callback)
 
             local items = common.parse_completion_items(items_raw, provider_name)
 
-            items = common.filter_context_sequences_in_items(items, context)
+            items = common.filter_context_sequences_in_items(items, context, config)
 
             items = utils.remove_spaces(items)
 

@@ -30,10 +30,14 @@ If you are using Ollama, you can simply set it to 'TERM'.]],
     )
 end
 
-M.complete = function(context, callback)
-    local config = require('minuet').config
+---@param context table
+---@param callback function
+---@param cfg? table Effective config (defaults to global). Pass to override
+---provider_options.openai_compatible per call.
+M.complete = function(context, callback, cfg)
+    local config = cfg or require('minuet').config
     local options = vim.deepcopy(config.provider_options.openai_compatible)
-    base.complete_openai_base(options, context, callback)
+    base.complete_openai_base(options, context, callback, config)
 end
 
 return M

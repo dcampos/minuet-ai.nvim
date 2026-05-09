@@ -10,13 +10,17 @@ function M.openai_get_text_fn_stream(json)
     return json.choices[1].delta.content
 end
 
-local function prepare_fim_items(items, context)
-    local filtered_items = common.filter_context_sequences_in_items(items, context)
+local function prepare_fim_items(items, context, cfg)
+    local filtered_items = common.filter_context_sequences_in_items(items, context, cfg)
     return vim.tbl_filter(function(x) return type(x) == 'string' and x:find '%S' end, filtered_items)
 end
 
-function M.complete_openai_base(options, context, callback)
-    local config = require('minuet').config
+---@param options table
+---@param context table
+---@param callback function
+---@param cfg? table Effective config (defaults to global).
+function M.complete_openai_base(options, context, callback, cfg)
+    local config = cfg or require('minuet').config
 
     common.terminate_all_jobs()
 
@@ -50,7 +54,7 @@ function M.complete_openai_base(options, context, callback)
         return
     end
 
-    local args = utils.make_curl_args(transformed_data.end_point, transformed_data.headers, data_file)
+    local args = utils.make_curl_args(transformed_data.end_point, transformed_data.headers, data_file, config)
 
     local provider_name = 'openai_compatible'
     local timestamp = os.time()
@@ -89,7 +93,7 @@ function M.complete_openai_base(options, context, callback)
 
             local items = common.parse_completion_items(items_raw, options.name)
 
-            items = common.filter_context_sequences_in_items(items, context)
+            items = common.filter_context_sequences_in_items(items, context, config)
 
             items = utils.remove_spaces(items)
 
@@ -123,8 +127,13 @@ function M.complete_openai_base(options, context, callback)
     })
 end
 
-function M.complete_openai_fim_base(options, get_text_fn, context, callback)
-    local config = require('minuet').config
+---@param options table Provider options (already a deepcopy from the caller).
+---@param get_text_fn function
+---@param context table
+---@param callback function
+---@param cfg? table Effective config (defaults to global).
+function M.complete_openai_fim_base(options, get_text_fn, context, callback, cfg)
+    local config = cfg or require('minuet').config
 
     common.terminate_all_jobs()
 
@@ -157,7 +166,7 @@ function M.complete_openai_fim_base(options, get_text_fn, context, callback)
         return
     end
 
-    local args = utils.make_curl_args(transformed_data.end_point, transformed_data.headers, data_file)
+    local args = utils.make_curl_args(transformed_data.end_point, transformed_data.headers, data_file, config)
 
     local items = {}
     local n_completions = config.n_completions
@@ -197,7 +206,7 @@ function M.complete_openai_fim_base(options, get_text_fn, context, callback)
                     table.insert(items, result)
                 end
 
-                callback(prepare_fim_items(items, context))
+                callback(prepare_fim_items(items, context, config))
             end,
             on_spawn_error = function()
                 os.remove(data_file)
@@ -209,7 +218,7 @@ function M.complete_openai_fim_base(options, get_text_fn, context, callback)
                     request_idx = idx,
                     timestamp = timestamp,
                 })
-                callback(prepare_fim_items(items, context))
+                callback(prepare_fim_items(items, context, config))
             end,
         })
 

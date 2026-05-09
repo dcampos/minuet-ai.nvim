@@ -97,9 +97,12 @@ function M.parse_completion_items(items_raw, provider)
     return items_table
 end
 
-function M.filter_context_sequences_in_items(items, context)
+---@param items table
+---@param context table
+---@param cfg? table Effective config (defaults to global), threaded to filter_text.
+function M.filter_context_sequences_in_items(items, context, cfg)
     items = vim.tbl_map(function(x)
-        return utils.filter_text(x, context)
+        return utils.filter_text(x, context, cfg)
     end, items)
 
     return items
