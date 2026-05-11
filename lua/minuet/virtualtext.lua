@@ -18,7 +18,6 @@ local internal = {
     timer = nil,
     context = {},
     is_on_throttle = false,
-    trigger_generation = 0,
 }
 
 local function should_auto_trigger()
@@ -70,37 +69,50 @@ local function get_ctx(bufnr)
     return ctx
 end
 
---- Collect effective suggestions from ctx.req_pool.
---- For each entry, computes text typed since trigger_pos; collects completions
---- whose raw text starts with that typed prefix, returning only the remainder.
---- Entries where the cursor has moved before trigger_pos are skipped.
---- Results are deduplicated.
+--- Extract the request parameters that distinguish one cache slot from another.
+--- Only fields that affect the generated completions are included (model, stop
+--- tokens, max_tokens, etc.). Provider endpoint and API key are excluded.
+---@param cfg table effective config (post-override)
+---@return table
+local function extract_cache_params(cfg)
+    local opts = cfg.provider_options[cfg.provider] or {}
+    return {
+        provider = cfg.provider,
+        model = opts.model,
+        optional = vim.deepcopy(opts.optional),
+    }
+end
+
+--- Derive effective suggestions from ctx.cache.
+--- A cache entry matches when: params are equal, lines_after is identical, and
+--- cur_before is an extension of entry.lines_before (or equal). Completions
+--- whose raw text starts with the additional text typed since the cache entry
+--- was stored are returned with that prefix stripped. Results are deduplicated.
 ---@param ctx minuet.VirtualtextSuggestionContext
----@param bufnr integer
+---@param params table   output of extract_cache_params for the current request
+---@param cur_before string  current lines_before
+---@param cur_after string   current lines_after
 ---@return string[]
-local function pool_suggestions(ctx, bufnr)
-    local cur = api.nvim_win_get_cursor(0)
-    local cur_row, cur_col = cur[1] - 1, cur[2]
-    local seen = {}
+local function pool_suggestions(ctx, params, cur_before, cur_after)
     local results = {}
+    local seen = {}
 
-    for _, entry in ipairs(ctx.req_pool or {}) do
-        local tp = entry.trigger_pos
-        local s_row, s_col = tp[1] - 1, tp[2]
-
-        if s_row > cur_row or (s_row == cur_row and s_col > cur_col) then
+    for _, entry in ipairs(ctx.cache or {}) do
+        if not vim.deep_equal(entry.params, params) then
+            goto continue
+        end
+        if entry.lines_after ~= cur_after then
+            goto continue
+        end
+        if cur_before:sub(1, #entry.lines_before) ~= entry.lines_before then
             goto continue
         end
 
-        local typed = ''
-        if s_row < cur_row or (s_row == cur_row and s_col < cur_col) then
-            local lines = api.nvim_buf_get_text(bufnr, s_row, s_col, cur_row, cur_col, {})
-            typed = table.concat(lines, '\n')
-        end
+        local typed_since = cur_before:sub(#entry.lines_before + 1)
 
         for _, comp in ipairs(entry.completions) do
-            if comp:sub(1, #typed) == typed then
-                local effective = comp:sub(#typed + 1)
+            if comp:sub(1, #typed_since) == typed_since then
+                local effective = comp:sub(#typed_since + 1)
                 if #effective > 0 and not seen[effective] then
                     seen[effective] = true
                     table.insert(results, effective)
@@ -114,24 +126,28 @@ local function pool_suggestions(ctx, bufnr)
     return results
 end
 
----@class minuet.ReqPoolEntry
----@field generation integer
----@field trigger_pos integer[]
+---@class minuet.CacheEntry
+---@field lines_before string
+---@field lines_after string
+---@field params table
 ---@field completions string[]
 
 ---@class minuet.VirtualtextSuggestionContext
 ---@field suggestions? string[]
 ---@field choice? integer
 ---@field shown_choices? table<string, true>
----@field req_pool? minuet.ReqPoolEntry[]
+---@field cache? minuet.CacheEntry[]
+---@field last_trigger_params? table
 ---@field n_retries? integer
 
+-- Resets display/active state. ctx.cache and ctx.last_trigger_params are
+-- intentionally preserved so cached completions remain available for the next
+-- cursor movement or trigger without a round-trip.
 ---@param ctx minuet.VirtualtextSuggestionContext
 local function reset_ctx(ctx)
     ctx.suggestions = nil
     ctx.choice = nil
     ctx.shown_choices = nil
-    ctx.req_pool = nil
     ctx.n_retries = nil
 end
 
@@ -232,8 +248,8 @@ end
 ---@param overrides? table Optional partial config patch, deep-merged onto the
 ---live config for this single request (no global mutation). Use to fire with a
 ---different provider/model/stop tokens without `change_model`/`change_provider`.
----@param is_retry? boolean When true this is an automatic pool-fill retry;
----n_retries is not reset and the pool is not wiped.
+---@param is_retry? boolean When true this is an automatic cache-fill retry;
+---n_retries is not reset.
 local function trigger(bufnr, overrides, is_retry)
     if bufnr ~= api.nvim_get_current_buf() or vim.fn.mode() ~= 'i' then
         return
@@ -250,47 +266,80 @@ local function trigger(bufnr, overrides, is_retry)
     if not is_retry then
         ctx.n_retries = 0
     end
-    ctx.req_pool = ctx.req_pool or {}
+    ctx.cache = ctx.cache or {}
 
     local context = utils.get_context(utils.make_cmp_context(), cfg)
-    local trigger_pos = api.nvim_win_get_cursor(0)
+    local cur_before = context.lines_before
+    local cur_after = context.lines_after
+    local params = extract_cache_params(cfg)
 
-    internal.trigger_generation = internal.trigger_generation + 1
-    local generation = internal.trigger_generation
+    -- Remember which params were active so on_cursor_moved_i can match them.
+    ctx.last_trigger_params = params
+
+    -- Show any already-cached suggestions immediately while the request is in
+    -- flight; also skip firing if the cache already satisfies n_completions.
+    local n_completions = cfg.n_completions or 3
+    local cached = pool_suggestions(ctx, params, cur_before, cur_after)
+    if #cached > 0 then
+        ctx.suggestions = cached
+        ctx.choice = ctx.choice or 1
+        ctx.shown_choices = ctx.shown_choices or {}
+        update_preview(ctx)
+        if not is_retry and #cached >= n_completions then
+            return
+        end
+    end
 
     local provider = require('minuet.backends.' .. cfg.provider)
 
     provider.complete(context, function(data)
-        -- Skip if the user has moved to a different buffer
         if api.nvim_get_current_buf() ~= bufnr then
             return
         end
 
         data = utils.list_dedup(data or {})
 
-        -- Find or create the pool entry for this generation (FIM backends call
-        -- back multiple times as parallel requests finish, each with a growing
-        -- accumulated list; we update in-place so the latest set is kept).
-        local pool = ctx.req_pool
+        -- Locate or create the cache entry for this (context, params) triple.
+        -- FIM backends fire the callback once per parallel request with the
+        -- growing accumulated list, so we merge rather than replace.
+        local cache = ctx.cache
         local entry
-        for _, e in ipairs(pool) do
-            if e.generation == generation then
+        for _, e in ipairs(cache) do
+            if vim.deep_equal(e.params, params)
+                and e.lines_before == cur_before
+                and e.lines_after == cur_after
+            then
                 entry = e
                 break
             end
         end
         if not entry then
-            entry = { generation = generation, trigger_pos = trigger_pos, completions = {} }
-            table.insert(pool, entry)
+            entry = {
+                lines_before = cur_before,
+                lines_after = cur_after,
+                params = params,
+                completions = {},
+            }
+            table.insert(cache, entry)
         end
-        entry.completions = data
 
-        while #pool > (cfg.virtualtext.pool_size or 8) do
-            table.remove(pool, 1)
+        -- Merge new completions into the entry (deduplicated)
+        local existing = {}
+        for _, c in ipairs(entry.completions) do existing[c] = true end
+        for _, c in ipairs(data) do
+            if not existing[c] then
+                existing[c] = true
+                table.insert(entry.completions, c)
+            end
         end
 
-        -- Derive effective suggestions from the full pool (prefix-matching)
-        local effective = pool_suggestions(ctx, bufnr)
+        local pool_size = cfg.virtualtext.pool_size or 8
+        while #cache > pool_size do
+            table.remove(cache, 1)
+        end
+
+        -- Recompute effective suggestions; show whatever the cache now yields.
+        local effective = pool_suggestions(ctx, params, cur_before, cur_after)
         if #effective > 0 then
             ctx.suggestions = effective
             if not ctx.choice or ctx.choice > #effective then
@@ -300,12 +349,12 @@ local function trigger(bufnr, overrides, is_retry)
             update_preview(ctx)
         end
 
-        -- Fire an extra request if we still have fewer unique suggestions than
-        -- desired and haven't exhausted retries for this trigger session.
+        -- Retry if still short and the response was non-empty (avoids retrying
+        -- on API errors or empty completions, which would just spin).
         local max_retries = cfg.virtualtext.max_retries or 3
         local n_retries = ctx.n_retries or 0
         if next(data)
-            and #(ctx.suggestions or {}) < (cfg.n_completions or 3)
+            and #(ctx.suggestions or {}) < n_completions
             and n_retries < max_retries
         then
             ctx.n_retries = n_retries + 1
@@ -646,21 +695,28 @@ function autocmd.on_cursor_moved_i()
     local bufnr = api.nvim_get_current_buf()
     local ctx = get_ctx(bufnr)
 
-    local effective = pool_suggestions(ctx, bufnr)
-    if #effective > 0 then
-        ctx.suggestions = effective
-        if not ctx.choice or ctx.choice > #effective then
-            ctx.choice = 1
+    -- Check cache with the params from the last trigger. Using stored params
+    -- (rather than re-resolving the config) means one-off completions fired
+    -- with overridden model/stop-tokens keep working while the user types into
+    -- them, without contaminating or being contaminated by the default cache.
+    if ctx.last_trigger_params then
+        local cfg = require('minuet').config
+        local context = utils.get_context(utils.make_cmp_context(), cfg)
+        local effective = pool_suggestions(ctx, ctx.last_trigger_params, context.lines_before, context.lines_after)
+        if #effective > 0 then
+            ctx.suggestions = effective
+            if not ctx.choice or ctx.choice > #effective then
+                ctx.choice = 1
+            end
+            ctx.shown_choices = ctx.shown_choices or {}
+            update_preview(ctx)
+            stop_timer()
+            return
         end
-        ctx.shown_choices = ctx.shown_choices or {}
-        update_preview(ctx)
-        stop_timer()
-        return
     end
 
-    -- Pool empty or no completions match the current position; clean up if
-    -- something was in the pool or had been shown, then ask for a fresh request.
-    if (ctx.req_pool and #ctx.req_pool > 0) or (ctx.shown_choices and next(ctx.shown_choices)) then
+    -- Cache miss: clear display state if something was shown, then request fresh.
+    if ctx.shown_choices and next(ctx.shown_choices) then
         cleanup(ctx)
     end
     if should_auto_trigger() then
