@@ -2,7 +2,6 @@
 local M = {}
 local utils = require 'minuet.utils'
 local api = vim.api
-local uv = vim.uv or vim.loop
 
 M.ns_id = api.nvim_create_namespace 'minuet.virtualtext'
 M.augroup = api.nvim_create_augroup('MinuetVirtualText', { clear = true })
@@ -19,7 +18,7 @@ local internal = {
     timer = nil,
     context = {},
     is_on_throttle = false,
-    current_completion_timestamp = 0,
+    trigger_generation = 0,
 }
 
 local function should_auto_trigger()
@@ -71,42 +70,69 @@ local function get_ctx(bufnr)
     return ctx
 end
 
----@return string[]?
-local function get_last_typed_text(ctx)
-    ctx = ctx or get_ctx()
-    local last_typed = nil
-    local last_pos = ctx.last_pos
-    if not last_pos then
-        return { '' }
+--- Collect effective suggestions from ctx.req_pool.
+--- For each entry, computes text typed since trigger_pos; collects completions
+--- whose raw text starts with that typed prefix, returning only the remainder.
+--- Entries where the cursor has moved before trigger_pos are skipped.
+--- Results are deduplicated.
+---@param ctx minuet.VirtualtextSuggestionContext
+---@param bufnr integer
+---@return string[]
+local function pool_suggestions(ctx, bufnr)
+    local cur = api.nvim_win_get_cursor(0)
+    local cur_row, cur_col = cur[1] - 1, cur[2]
+    local seen = {}
+    local results = {}
+
+    for _, entry in ipairs(ctx.req_pool or {}) do
+        local tp = entry.trigger_pos
+        local s_row, s_col = tp[1] - 1, tp[2]
+
+        if s_row > cur_row or (s_row == cur_row and s_col > cur_col) then
+            goto continue
+        end
+
+        local typed = ''
+        if s_row < cur_row or (s_row == cur_row and s_col < cur_col) then
+            local lines = api.nvim_buf_get_text(bufnr, s_row, s_col, cur_row, cur_col, {})
+            typed = table.concat(lines, '\n')
+        end
+
+        for _, comp in ipairs(entry.completions) do
+            if comp:sub(1, #typed) == typed then
+                local effective = comp:sub(#typed + 1)
+                if #effective > 0 and not seen[effective] then
+                    seen[effective] = true
+                    table.insert(results, effective)
+                end
+            end
+        end
+
+        ::continue::
     end
 
-    local current_pos = api.nvim_win_get_cursor(0)
-
-    -- Convert 1-based line to 0-based for nvim_buf_get_text
-    local start_row = last_pos[1] - 1
-    local start_col = last_pos[2]
-    local end_row = current_pos[1] - 1
-    local end_col = current_pos[2]
-
-    if start_row < end_row or (start_row == end_row and start_col <= end_col) then
-        last_typed = api.nvim_buf_get_text(0, start_row, start_col, end_row, end_col, {})
-    end
-
-    return last_typed
+    return results
 end
+
+---@class minuet.ReqPoolEntry
+---@field generation integer
+---@field trigger_pos integer[]
+---@field completions string[]
 
 ---@class minuet.VirtualtextSuggestionContext
 ---@field suggestions? string[]
 ---@field choice? integer
 ---@field shown_choices? table<string, true>
----@field last_pos integer[]
+---@field req_pool? minuet.ReqPoolEntry[]
+---@field n_retries? integer
 
 ---@param ctx minuet.VirtualtextSuggestionContext
 local function reset_ctx(ctx)
     ctx.suggestions = nil
     ctx.choice = nil
     ctx.shown_choices = nil
-    ctx.last_pos = nil
+    ctx.req_pool = nil
+    ctx.n_retries = nil
 end
 
 local function stop_timer()
@@ -191,8 +217,6 @@ local function update_preview(ctx)
     if not ctx.shown_choices[suggestion] then
         ctx.shown_choices[suggestion] = true
     end
-
-    ctx.last_pos = api.nvim_win_get_cursor(0)
 end
 
 ---@param ctx? minuet.VirtualtextSuggestionContext
@@ -203,41 +227,14 @@ local function cleanup(ctx)
     clear_preview()
 end
 
----@param ctx minuet.VirtualtextSuggestionContext
----@return boolean Returns true if there are suggestions matching the user’s typed text; otherwise, false.
-local function update_suggestion_on_typing(ctx)
-    if not (ctx and ctx.suggestions and ctx.choice) then
-        return false
-    end
-
-    local last_typed_text = get_last_typed_text()
-    if not (last_typed_text and #last_typed_text > 0) then
-        return false
-    end
-
-    local typed = table.concat(last_typed_text, '\n')
-    if #typed == 0 or typed ~= ctx.suggestions[ctx.choice]:sub(1, #typed) then
-        return false
-    end
-
-    for i, suggestion in ipairs(ctx.suggestions) do
-        if suggestion:sub(1, #typed) == typed then
-            ctx.suggestions[i] = suggestion:sub(#typed + 1, -1)
-        else
-            ctx.suggestions[i] = ''
-        end
-    end
-
-    update_preview(ctx)
-    stop_timer()
-    return true
-end
 
 ---@param bufnr integer
 ---@param overrides? table Optional partial config patch, deep-merged onto the
 ---live config for this single request (no global mutation). Use to fire with a
 ---different provider/model/stop tokens without `change_model`/`change_provider`.
-local function trigger(bufnr, overrides)
+---@param is_retry? boolean When true this is an automatic pool-fill retry;
+---n_retries is not reset and the pool is not wiped.
+local function trigger(bufnr, overrides, is_retry)
     if bufnr ~= api.nvim_get_current_buf() or vim.fn.mode() ~= 'i' then
         return
     end
@@ -249,33 +246,71 @@ local function trigger(bufnr, overrides)
         cfg = vim.tbl_deep_extend('force', cfg, overrides)
     end
 
+    local ctx = get_ctx(bufnr)
+    if not is_retry then
+        ctx.n_retries = 0
+    end
+    ctx.req_pool = ctx.req_pool or {}
+
     local context = utils.get_context(utils.make_cmp_context(), cfg)
+    local trigger_pos = api.nvim_win_get_cursor(0)
+
+    internal.trigger_generation = internal.trigger_generation + 1
+    local generation = internal.trigger_generation
 
     local provider = require('minuet.backends.' .. cfg.provider)
-    local timestamp = uv.now()
-    internal.current_completion_timestamp = timestamp
 
     provider.complete(context, function(data)
-        if timestamp ~= internal.current_completion_timestamp then
-            if data and next(data) then
-                -- Notify if outdated (and non-empty) completion items arrive
-                utils.notify('Completion items arrived, but too late, aborted', 'debug', 'info')
-            end
+        -- Skip if the user has moved to a different buffer
+        if api.nvim_get_current_buf() ~= bufnr then
             return
         end
 
         data = utils.list_dedup(data or {})
-        local ctx = get_ctx()
 
-        if next(data) then
-            ctx.suggestions = data
-            if not ctx.choice then
-                ctx.choice = 1
+        -- Find or create the pool entry for this generation (FIM backends call
+        -- back multiple times as parallel requests finish, each with a growing
+        -- accumulated list; we update in-place so the latest set is kept).
+        local pool = ctx.req_pool
+        local entry
+        for _, e in ipairs(pool) do
+            if e.generation == generation then
+                entry = e
+                break
             end
-            ctx.shown_choices = {}
+        end
+        if not entry then
+            entry = { generation = generation, trigger_pos = trigger_pos, completions = {} }
+            table.insert(pool, entry)
+        end
+        entry.completions = data
+
+        while #pool > (cfg.virtualtext.pool_size or 8) do
+            table.remove(pool, 1)
         end
 
-        update_preview(ctx)
+        -- Derive effective suggestions from the full pool (prefix-matching)
+        local effective = pool_suggestions(ctx, bufnr)
+        if #effective > 0 then
+            ctx.suggestions = effective
+            if not ctx.choice or ctx.choice > #effective then
+                ctx.choice = 1
+            end
+            ctx.shown_choices = ctx.shown_choices or {}
+            update_preview(ctx)
+        end
+
+        -- Fire an extra request if we still have fewer unique suggestions than
+        -- desired and haven't exhausted retries for this trigger session.
+        local max_retries = cfg.virtualtext.max_retries or 3
+        local n_retries = ctx.n_retries or 0
+        if next(data)
+            and #(ctx.suggestions or {}) < (cfg.n_completions or 3)
+            and n_retries < max_retries
+        then
+            ctx.n_retries = n_retries + 1
+            trigger(bufnr, overrides, true)
+        end
     end, cfg)
 end
 
@@ -361,8 +396,8 @@ action.prev = function(overrides)
 end
 
 -- Insert the first n_chars of the current suggestion. ctx is NOT reset when
--- there is remaining text so that CursorMovedI/update_suggestion_on_typing can
--- strip the accepted prefix and display the remainder as virtual text.
+-- there is remaining text; on the next CursorMovedI the pool will re-derive the
+-- remainder from the updated cursor position and display it as virtual text.
 local function accept_n_chars(n_chars)
     local ctx = get_ctx()
     local suggestion = get_current_suggestion(ctx)
@@ -608,15 +643,24 @@ function autocmd.on_buf_enter()
 end
 
 function autocmd.on_cursor_moved_i()
-    local ctx = get_ctx()
+    local bufnr = api.nvim_get_current_buf()
+    local ctx = get_ctx(bufnr)
 
-    if update_suggestion_on_typing(ctx) then
+    local effective = pool_suggestions(ctx, bufnr)
+    if #effective > 0 then
+        ctx.suggestions = effective
+        if not ctx.choice or ctx.choice > #effective then
+            ctx.choice = 1
+        end
+        ctx.shown_choices = ctx.shown_choices or {}
+        update_preview(ctx)
+        stop_timer()
         return
     end
 
-    -- we don't cleanup immediately if the completion has arrived but not
-    -- display yet.
-    if ctx.shown_choices and next(ctx.shown_choices) then
+    -- Pool empty or no completions match the current position; clean up if
+    -- something was in the pool or had been shown, then ask for a fresh request.
+    if (ctx.req_pool and #ctx.req_pool > 0) or (ctx.shown_choices and next(ctx.shown_choices)) then
         cleanup(ctx)
     end
     if should_auto_trigger() then

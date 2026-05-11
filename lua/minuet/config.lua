@@ -243,6 +243,11 @@ local M = {
         -- Whether show virtual text suggestion when the completion menu
         -- (nvim-cmp or blink-cmp) is visible.
         show_on_completion_menu = false,
+        -- Maximum number of response pool entries kept per buffer.
+        pool_size = 8,
+        -- Maximum automatic retry requests fired per trigger session when the
+        -- pool yields fewer than n_completions effective suggestions.
+        max_retries = 3,
     },
     provider = 'codestral',
     -- the maximum total characters of the context before and after the cursor
