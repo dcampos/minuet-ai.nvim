@@ -69,25 +69,107 @@ local function get_ctx(bufnr)
     return ctx
 end
 
+---@param optional table?
+---@return string[]?
+local function collect_stop_tokens(optional)
+    if type(optional) ~= 'table' then
+        return nil
+    end
+
+    local raw = optional.stop or optional.stop_sequences
+    if type(raw) == 'string' then
+        return { raw }
+    end
+    if type(raw) == 'table' then
+        return raw
+    end
+
+    return nil
+end
+
+---@param optional table?
+---@return table?
+local function strip_stop_tokens(optional)
+    if type(optional) ~= 'table' then
+        return optional
+    end
+
+    local stripped = vim.deepcopy(optional)
+    stripped.stop = nil
+    stripped.stop_sequences = nil
+    return stripped
+end
+
+---@param text string
+---@param stop_tokens string[]?
+---@return string
+local function truncate_at_stop_tokens(text, stop_tokens)
+    if type(text) ~= 'string' or not stop_tokens or #stop_tokens == 0 then
+        return text
+    end
+
+    local cutoff = nil
+    for _, token in ipairs(stop_tokens) do
+        if type(token) == 'string' and token ~= '' then
+            local idx = text:find(token, 1, true)
+            if idx and (not cutoff or idx < cutoff) then
+                cutoff = idx
+            end
+        end
+    end
+
+    if cutoff then
+        return text:sub(1, cutoff - 1)
+    end
+
+    return text
+end
+
+---@param cached string
+---@param current string
+---@return integer?
+local function match_prefix_to_cached_suffix(cached, current)
+    if #cached == 0 then
+        return 0
+    end
+    if #current == 0 then
+        return nil
+    end
+
+    local max_len = math.min(#cached, #current)
+    for len = max_len, 1, -1 do
+        if cached:sub(#cached - len + 1) == current:sub(1, len) then
+            return len
+        end
+    end
+
+    return nil
+end
+
 --- Extract the request parameters that distinguish one cache slot from another.
---- Only fields that affect the generated completions are included (model, stop
---- tokens, max_tokens, etc.). Provider endpoint and API key are excluded.
+--- Only fields that affect the generated completions are included (model,
+--- non-stop optional fields, max_tokens, etc.). Provider endpoint and API key
+--- are excluded. Stop tokens are tracked separately so cache reuse can remain
+--- valid across narrower or broader stop constraints.
 ---@param cfg table effective config (post-override)
 ---@return table
 local function extract_cache_params(cfg)
     local opts = cfg.provider_options[cfg.provider] or {}
+    local optional = vim.deepcopy(opts.optional)
     return {
         provider = cfg.provider,
         model = opts.model,
-        optional = vim.deepcopy(opts.optional),
+        optional = strip_stop_tokens(optional),
+        stop_tokens = collect_stop_tokens(optional),
     }
 end
 
 --- Derive effective suggestions from ctx.cache.
---- A cache entry matches when: params are equal, lines_after is identical, and
---- cur_before is an extension of entry.lines_before (or equal). Completions
---- whose raw text starts with the additional text typed since the cache entry
---- was stored are returned with that prefix stripped. Results are deduplicated.
+--- A cache entry matches when: provider/model and non-stop optional fields are
+--- equal, the cursor-adjacent prefix/suffix of the before-context overlaps, and
+--- the after-context is still compatible up to truncation. Completions whose raw
+--- text starts with the text typed since the overlap are returned with that
+--- prefix stripped. Results are deduplicated.
 ---@param ctx minuet.VirtualtextSuggestionContext
 ---@param params table   output of extract_cache_params for the current request
 ---@param cur_before string  current lines_before
@@ -98,44 +180,45 @@ local function pool_suggestions(ctx, params, cur_before, cur_after)
     local seen = {}
 
     for _, entry in ipairs(ctx.cache or {}) do
-        if not vim.deep_equal(entry.params, params) then
+        if entry.params.provider ~= params.provider then
             goto continue
         end
-        if entry.lines_after ~= cur_after then
+        if entry.params.model ~= params.model then
             goto continue
         end
-        if cur_before:sub(1, #entry.lines_before) ~= entry.lines_before then
+        if not vim.deep_equal(entry.params.optional, params.optional) then
+            goto continue
+        end
+        if type(entry.lines_after) ~= 'string' or type(cur_after) ~= 'string' then
+            goto continue
+        end
+        if not (
+            entry.lines_after:sub(1, #cur_after) == cur_after
+            or cur_after:sub(1, #entry.lines_after) == entry.lines_after
+        ) then
             goto continue
         end
 
-        local typed_since = cur_before:sub(#entry.lines_before + 1)
-
-        -- Collect stop tokens for this cache entry so we can truncate completions
-        -- that extend past where the model was asked to stop. Handles both OpenAI
-        -- (`stop`) and Claude (`stop_sequences`) field names.
-        local stop_tokens = nil
-        local opt = entry.params.optional
-        if opt then
-            local raw = opt.stop or opt.stop_sequences
-            if type(raw) == 'string' then
-                stop_tokens = { raw }
-            elseif type(raw) == 'table' then
-                stop_tokens = raw
-            end
+        if type(entry.lines_before) ~= 'string' or type(cur_before) ~= 'string' then
+            goto continue
         end
 
+        local typed_since_len = match_prefix_to_cached_suffix(entry.lines_before, cur_before)
+        if typed_since_len == nil then
+            goto continue
+        end
+
+        local typed_since = cur_before:sub(typed_since_len + 1)
+        local stop_tokens = vim.deepcopy(params.stop_tokens or {})
+        vim.list_extend(stop_tokens, entry.params.stop_tokens or {})
+
+        -- Apply both the current request's and cached request's stop tokens so
+        -- cached completions remain reusable when the user narrows or widens the
+        -- requested stop constraint.
         for _, comp in ipairs(entry.completions) do
             if comp:sub(1, #typed_since) == typed_since then
                 local effective = comp:sub(#typed_since + 1)
-
-                if stop_tokens then
-                    for _, token in ipairs(stop_tokens) do
-                        local idx = effective:find(token, 1, true)
-                        if idx then
-                            effective = effective:sub(1, idx - 1)
-                        end
-                    end
-                end
+                effective = truncate_at_stop_tokens(effective, stop_tokens)
 
                 if #effective > 0 and not seen[effective] then
                     seen[effective] = true
