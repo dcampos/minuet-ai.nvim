@@ -110,9 +110,33 @@ local function pool_suggestions(ctx, params, cur_before, cur_after)
 
         local typed_since = cur_before:sub(#entry.lines_before + 1)
 
+        -- Collect stop tokens for this cache entry so we can truncate completions
+        -- that extend past where the model was asked to stop. Handles both OpenAI
+        -- (`stop`) and Claude (`stop_sequences`) field names.
+        local stop_tokens = nil
+        local opt = entry.params.optional
+        if opt then
+            local raw = opt.stop or opt.stop_sequences
+            if type(raw) == 'string' then
+                stop_tokens = { raw }
+            elseif type(raw) == 'table' then
+                stop_tokens = raw
+            end
+        end
+
         for _, comp in ipairs(entry.completions) do
             if comp:sub(1, #typed_since) == typed_since then
                 local effective = comp:sub(#typed_since + 1)
+
+                if stop_tokens then
+                    for _, token in ipairs(stop_tokens) do
+                        local idx = effective:find(token, 1, true)
+                        if idx then
+                            effective = effective:sub(1, idx - 1)
+                        end
+                    end
+                end
+
                 if #effective > 0 and not seen[effective] then
                     seen[effective] = true
                     table.insert(results, effective)
@@ -338,8 +362,11 @@ local function trigger(bufnr, overrides, is_retry)
             table.remove(cache, 1)
         end
 
-        -- Recompute effective suggestions; show whatever the cache now yields.
-        local effective = pool_suggestions(ctx, params, cur_before, cur_after)
+        -- Re-read cursor position so we don't flash stale ghost-text when the
+        -- user typed ahead while the request was in flight.
+        local cmp_ctx_now = utils.make_cmp_context()
+        local ctx_now = utils.get_context(cmp_ctx_now, cfg)
+        local effective = pool_suggestions(ctx, params, ctx_now.lines_before, ctx_now.lines_after)
         if #effective > 0 then
             ctx.suggestions = effective
             if not ctx.choice or ctx.choice > #effective then
