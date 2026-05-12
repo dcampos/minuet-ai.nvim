@@ -87,7 +87,7 @@ function M.complete_openai_base(options, context, callback, cfg)
             end
 
             if not items_raw then
-                callback()
+                callback(nil, true)
                 return
             end
 
@@ -97,7 +97,7 @@ function M.complete_openai_base(options, context, callback, cfg)
 
             items = utils.remove_spaces(items)
 
-            callback(items)
+            callback(items, true)
         end,
         on_spawn_error = function()
             os.remove(data_file)
@@ -109,7 +109,7 @@ function M.complete_openai_base(options, context, callback, cfg)
                 request_idx = 1,
                 timestamp = timestamp,
             })
-            callback()
+            callback(nil, true)
         end,
     })
 
@@ -170,6 +170,7 @@ function M.complete_openai_fim_base(options, get_text_fn, context, callback, cfg
 
     local items = {}
     local n_completions = config.n_completions
+    local finished = 0
 
     local provider_name = 'openai_fim_compatible'
     local timestamp = os.time()
@@ -206,7 +207,8 @@ function M.complete_openai_fim_base(options, get_text_fn, context, callback, cfg
                     table.insert(items, result)
                 end
 
-                callback(prepare_fim_items(items, context, config))
+                finished = finished + 1
+                callback(prepare_fim_items(items, context, config), finished >= n_completions)
             end,
             on_spawn_error = function()
                 os.remove(data_file)
@@ -218,7 +220,8 @@ function M.complete_openai_fim_base(options, get_text_fn, context, callback, cfg
                     request_idx = idx,
                     timestamp = timestamp,
                 })
-                callback(prepare_fim_items(items, context, config))
+                finished = finished + 1
+                callback(prepare_fim_items(items, context, config), finished >= n_completions)
             end,
         })
 

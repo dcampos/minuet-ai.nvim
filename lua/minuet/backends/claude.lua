@@ -101,7 +101,7 @@ M.complete = function(context, callback, cfg)
             end
 
             if not items_raw then
-                callback()
+                callback(nil, true)
                 return
             end
 
@@ -111,7 +111,7 @@ M.complete = function(context, callback, cfg)
 
             items = utils.remove_spaces(items)
 
-            callback(items)
+            callback(items, true)
         end,
         on_spawn_error = function()
             os.remove(data_file)
@@ -123,7 +123,7 @@ M.complete = function(context, callback, cfg)
                 request_idx = 1,
                 timestamp = timestamp,
             })
-            callback()
+            callback(nil, true)
         end,
     })
 

@@ -249,18 +249,58 @@ end
 ---@param cmp_context table
 ---@param cfg? table Effective config (defaults to global). Pass an effective
 ---config to override values like context_window/context_ratio per call.
+local function collect_nearby_lines(bufnr, start_line, step, max_chars)
+    local chunks = {}
+    local chars = 0
+    local block_size = 128
+    local line_count = vim.api.nvim_buf_line_count(bufnr)
+    local line = start_line
+
+    while chars < max_chars do
+        if step < 0 then
+            if line <= 0 then
+                break
+            end
+            local chunk_start = math.max(0, line - block_size)
+            local lines = vim.api.nvim_buf_get_lines(bufnr, chunk_start, line, false)
+            if #lines == 0 then
+                break
+            end
+            local chunk = table.concat(lines, '\n')
+            table.insert(chunks, 1, chunk)
+            chars = chars + vim.fn.strchars(chunk) + 1
+            line = chunk_start
+        else
+            if line >= line_count then
+                break
+            end
+            local chunk_end = math.min(line_count, line + block_size)
+            local lines = vim.api.nvim_buf_get_lines(bufnr, line, chunk_end, false)
+            if #lines == 0 then
+                break
+            end
+            local chunk = table.concat(lines, '\n')
+            table.insert(chunks, chunk)
+            chars = chars + vim.fn.strchars(chunk) + 1
+            line = chunk_end
+        end
+    end
+
+    return table.concat(chunks, '\n')
+end
+
 function M.get_context(cmp_context, cfg)
     local config = cfg or require('minuet').config
 
     local cursor = cmp_context.cursor
-    local lines_before_list = vim.api.nvim_buf_get_lines(0, 0, cursor.line, false)
-    local lines_after_list = vim.api.nvim_buf_get_lines(0, cursor.line + 1, -1, false)
+    local bufnr = 0
+    local max_side_chars = config.context_window
 
-    local lines_before = table.concat(lines_before_list, '\n')
-    local lines_after = table.concat(lines_after_list, '\n')
+    local before_prefix = collect_nearby_lines(bufnr, cursor.line, -1, max_side_chars)
+    local after_suffix = collect_nearby_lines(bufnr, cursor.line + 1, 1, max_side_chars)
 
-    lines_before = lines_before .. '\n' .. cmp_context.cursor_before_line
-    lines_after = cmp_context.cursor_after_line .. '\n' .. lines_after
+    local lines_before = before_prefix .. '\n' .. cmp_context.cursor_before_line
+    local lines_after = cmp_context.cursor_after_line .. '\n' .. after_suffix
 
     local n_chars_before = vim.fn.strchars(lines_before)
     local n_chars_after = vim.fn.strchars(lines_after)
@@ -271,27 +311,18 @@ function M.get_context(cmp_context, cfg)
     }
 
     if n_chars_before + n_chars_after > config.context_window then
-        -- use some heuristic to decide the context length of before cursor and after cursor
         if n_chars_before < config.context_window * config.context_ratio then
-            -- If the context length before cursor does not exceed the maximum
-            -- size, we include the full content before the cursor.
             lines_after = vim.fn.strcharpart(lines_after, 0, config.context_window - n_chars_before)
             opts.is_incomplete_after = true
         elseif n_chars_after < config.context_window * (1 - config.context_ratio) then
-            -- if the context length after cursor does not exceed the maximum
-            -- size, we include the full content after the cursor.
             lines_before = vim.fn.strcharpart(lines_before, n_chars_before + n_chars_after - config.context_window)
             opts.is_incomplete_before = true
         else
-            -- at the middle of the file, use the context_ratio to determine the allocation
-            lines_after =
-                vim.fn.strcharpart(lines_after, 0, math.floor(config.context_window * (1 - config.context_ratio)))
-
+            lines_after = vim.fn.strcharpart(lines_after, 0, math.floor(config.context_window * (1 - config.context_ratio)))
             lines_before = vim.fn.strcharpart(
                 lines_before,
                 n_chars_before - math.floor(config.context_window * config.context_ratio)
             )
-
             opts.is_incomplete_before = true
             opts.is_incomplete_after = true
         end

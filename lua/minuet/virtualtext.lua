@@ -246,6 +246,9 @@ end
 ---@field cache? minuet.CacheEntry[]
 ---@field last_trigger_params? table
 ---@field n_retries? integer
+---@field request_inflight? boolean
+---@field pending_trigger? boolean
+---@field pending_overrides? table
 
 -- Resets display/active state. ctx.cache and ctx.last_trigger_params are
 -- intentionally preserved so cached completions remain available for the next
@@ -347,6 +350,9 @@ local function cleanup(ctx)
     ctx = ctx or get_ctx()
     stop_timer()
     reset_ctx(ctx)
+    ctx.request_inflight = nil
+    ctx.pending_trigger = nil
+    ctx.pending_overrides = nil
     clear_preview()
 end
 
@@ -370,6 +376,12 @@ local function trigger(bufnr, overrides, is_retry)
     end
 
     local ctx = get_ctx(bufnr)
+    if ctx.request_inflight and not is_retry then
+        ctx.pending_trigger = true
+        ctx.pending_overrides = overrides
+        return
+    end
+
     if not is_retry then
         ctx.n_retries = 0
     end
@@ -399,7 +411,9 @@ local function trigger(bufnr, overrides, is_retry)
 
     local provider = require('minuet.backends.' .. cfg.provider)
 
-    provider.complete(context, function(data)
+    ctx.request_inflight = true
+
+    provider.complete(context, function(data, done)
         if api.nvim_get_current_buf() ~= bufnr then
             return
         end
@@ -459,16 +473,31 @@ local function trigger(bufnr, overrides, is_retry)
             update_preview(ctx)
         end
 
-        -- Retry if still short and the response was non-empty (avoids retrying
-        -- on API errors or empty completions, which would just spin).
-        local max_retries = cfg.virtualtext.max_retries or 3
-        local n_retries = ctx.n_retries or 0
-        if next(data)
-            and #(ctx.suggestions or {}) < n_completions
-            and n_retries < max_retries
-        then
-            ctx.n_retries = n_retries + 1
-            trigger(bufnr, overrides, true)
+        if done ~= false then
+            ctx.request_inflight = false
+
+            local max_retries = cfg.virtualtext.max_retries or 3
+            local n_retries = ctx.n_retries or 0
+            if (not ctx.pending_trigger)
+                and next(data)
+                and #(ctx.suggestions or {}) < n_completions
+                and n_retries < max_retries
+            then
+                ctx.n_retries = n_retries + 1
+                trigger(bufnr, overrides, true)
+                return
+            end
+
+            if ctx.pending_trigger then
+                local pending_overrides = ctx.pending_overrides
+                ctx.pending_trigger = nil
+                ctx.pending_overrides = nil
+                vim.schedule(function()
+                    if api.nvim_get_current_buf() == bufnr and vim.fn.mode() == 'i' then
+                        trigger(bufnr, pending_overrides)
+                    end
+                end)
+            end
         end
     end, cfg)
 end
