@@ -496,7 +496,7 @@ local function schedule()
     local config = require('minuet').config
     local bufnr = api.nvim_get_current_buf()
 
-    internal.timer = vim.defer_fn(function()
+    local function maybe_trigger()
         local show_on_completion_menu = require('minuet').config.virtualtext.show_on_completion_menu
 
         if
@@ -507,13 +507,22 @@ local function schedule()
             return
         end
 
-        internal.is_on_throttle = true
-        vim.defer_fn(function()
-            internal.is_on_throttle = false
-        end, config.throttle)
+        if (config.throttle or 0) > 0 then
+            internal.is_on_throttle = true
+            vim.defer_fn(function()
+                internal.is_on_throttle = false
+            end, config.throttle)
+        end
 
         trigger(bufnr)
-    end, config.debounce)
+    end
+
+    if (config.debounce or 0) <= 0 then
+        maybe_trigger()
+        return
+    end
+
+    internal.timer = vim.defer_fn(maybe_trigger, config.debounce)
 end
 
 local action = {}

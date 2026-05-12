@@ -186,4 +186,49 @@ return {
             helpers.delete_buffer(bufnr)
         end,
     },
+    {
+        name = 'virtualtext auto trigger fires immediately while typing when debounce and throttle are zero',
+        run = function()
+            helpers.setup_root_config {
+                provider = 'test',
+                debounce = 0,
+                throttle = 0,
+                virtualtext = {
+                    debounce = 0,
+                    throttle = 0,
+                    max_retries = 0,
+                },
+            }
+
+            local backend_calls = 0
+
+            package.loaded['minuet.backends.test'] = {
+                complete = function(_, callback)
+                    backend_calls = backend_calls + 1
+                    callback {}
+                end,
+            }
+
+            local virtualtext = helpers.reload 'minuet.virtualtext'
+            virtualtext.setup()
+
+            local bufnr = helpers.create_buffer({ 'alpha' }, { 1, 5 })
+            vim.b.minuet_virtual_text_auto_trigger = true
+
+            local original_mode = vim.fn.mode
+            vim.fn.mode = function()
+                return 'i'
+            end
+
+            vim.api.nvim_exec_autocmds('CursorMovedI', { buffer = bufnr })
+            vim.api.nvim_exec_autocmds('CursorMovedI', { buffer = bufnr })
+            vim.api.nvim_exec_autocmds('CursorMovedI', { buffer = bufnr })
+
+            helpers.expect_equal(backend_calls, 3, 'zero-debounce auto trigger should not be deferred until typing pauses')
+
+            virtualtext.action.dismiss()
+            vim.fn.mode = original_mode
+            helpers.delete_buffer(bufnr)
+        end,
+    },
 }
