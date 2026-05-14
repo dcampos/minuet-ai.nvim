@@ -1,3 +1,26 @@
+# Fork notice
+
+Fork of [milanglacier/minuet-ai.nvim](https://github.com/milanglacier/minuet-ai.nvim).
+`main` tracks upstream and adds:
+
+- **Snappier virtual text.** Suggestions appear instantly from cache while a
+  fresh request runs in the background. When you type ahead, old suggestions
+  stay visible as long as what you typed matches their start, so the ghost
+  text no longer flashes or disappears between keystrokes.
+- **One-shot model overrides.** `action.fire({ provider = ..., model = ... })`
+  (and the same on `action.next` / `action.prev`) fires a single completion
+  with a different provider, model, or stop tokens without touching your
+  global config. `minuet.with.{provider, model, optional, merge}` build the
+  override tables.
+- **FIM whitespace is preserved.** Leading whitespace used to be stripped
+  from FIM completions, corrupting indented output. It now passes through
+  untouched.
+- **More ways to accept.** `action.accept` takes an `n_words` count for
+  word-by-word acceptance, and `action.accept_until_char` accepts up to a
+  character you type, like vim's `f{char}`.
+
+---
+
 - [Minuet](#minuet)
 - [Features](#features)
 - [Requirements](#requirements)
