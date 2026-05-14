@@ -248,6 +248,14 @@ local M = {
         -- Maximum automatic retry requests fired per trigger session when the
         -- pool yields fewer than n_completions effective suggestions.
         max_retries = 3,
+        -- A cache entry is skipped when the cursor has advanced more than this
+        -- many characters past it. Keeps the prefix-shift scan bounded and
+        -- prevents stale completions from showing up after significant typing.
+        cache_max_chars_ahead = 40,
+        -- When the cursor has advanced past this many characters (but still
+        -- within cache_max_chars_ahead), the cached completion is shown but a
+        -- background re-fetch is also fired.
+        cache_soft_chars_ahead = 20,
     },
     provider = 'codestral',
     -- the maximum total characters of the context before and after the cursor
@@ -309,6 +317,12 @@ local M = {
     -- Similar to after_cursor_filter_length but trim the completion item from
     -- prefix instead of suffix.
     before_cursor_filter_length = 2,
+    -- Whether to apply context-sequence filtering to FIM completions. The
+    -- filter removes text that mirrors the surrounding context, which can strip
+    -- legitimate indentation and leading/trailing content from FIM models.
+    -- Disabled by default for FIM providers; enable only if the model
+    -- consistently repeats context verbatim.
+    fim_filter_context = false,
     proxy = nil,
 }
 

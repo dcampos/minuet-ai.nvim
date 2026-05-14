@@ -127,8 +127,9 @@ end
 
 ---@param cached string
 ---@param current string
+---@param max_shift integer  skip entries whose shift exceeds this
 ---@return integer?
-local function match_prefix_to_cached_suffix(cached, current)
+local function match_prefix_to_cached_suffix(cached, current, max_shift)
     if #cached == 0 then
         return 0
     end
@@ -136,8 +137,17 @@ local function match_prefix_to_cached_suffix(cached, current)
         return nil
     end
 
+    -- Bail out early when the two strings differ in length by more than
+    -- max_shift — no match within the allowed shift window is possible.
+    if math.abs(#current - #cached) > max_shift then
+        return nil
+    end
+
     local max_len = math.min(#cached, #current)
-    for len = max_len, 1, -1 do
+    -- Only scan shifts up to max_shift: typed_since length = #current - len,
+    -- so len >= #current - max_shift.
+    local min_len = math.max(1, #current - max_shift)
+    for len = max_len, min_len, -1 do
         if cached:sub(#cached - len + 1) == current:sub(1, len) then
             return len
         end
@@ -165,19 +175,35 @@ local function extract_cache_params(cfg)
 end
 
 --- Derive effective suggestions from ctx.cache.
---- A cache entry matches when: provider/model and non-stop optional fields are
---- equal, the cursor-adjacent prefix/suffix of the before-context overlaps, and
---- the after-context is still compatible up to truncation. Completions whose raw
---- text starts with the text typed since the overlap are returned with that
---- prefix stripped. Results are deduplicated.
+--- A cache entry matches when: provider/model, non-stop optional fields, and
+--- stop tokens are all equal; the after-context is still compatible; and the
+--- before-context suffix/prefix overlap is within the configured shift window.
+--- Completions whose raw text starts with the text typed since the overlap are
+--- returned with that prefix stripped. Results are deduplicated.
+---
+--- Returns (results, needs_refresh): needs_refresh is true when at least one
+--- matched entry fell in the soft-limit zone (cursor drifted past
+--- cache_soft_chars_ahead but within cache_max_chars_ahead), signalling that a
+--- background re-fetch is worthwhile.
 ---@param ctx minuet.VirtualtextSuggestionContext
 ---@param params table   output of extract_cache_params for the current request
 ---@param cur_before string  current lines_before
 ---@param cur_after string   current lines_after
----@return string[]
-local function pool_suggestions(ctx, params, cur_before, cur_after)
+---@param cfg table  effective config
+---@return string[], boolean
+local function pool_suggestions(ctx, params, cur_before, cur_after, cfg)
+    local vt_cfg = cfg.virtualtext or {}
+    local hard_limit = vt_cfg.cache_max_chars_ahead or 40
+    local soft_limit = vt_cfg.cache_soft_chars_ahead or 20
+
     local results = {}
     local seen = {}
+    local needs_refresh = false
+
+    -- Normalise a stop-token list so nil and {} compare equal.
+    local function norm_stops(t)
+        return (t and #t > 0) and t or nil
+    end
 
     for _, entry in ipairs(ctx.cache or {}) do
         if entry.params.provider ~= params.provider then
@@ -189,6 +215,11 @@ local function pool_suggestions(ctx, params, cur_before, cur_after)
         if not vim.deep_equal(entry.params.optional, params.optional) then
             goto continue
         end
+        -- Require identical stop tokens so manual (multi-line) and auto
+        -- (single-line) completions do not bleed into each other.
+        if not vim.deep_equal(norm_stops(entry.params.stop_tokens), norm_stops(params.stop_tokens)) then
+            goto continue
+        end
         if type(entry.lines_after) ~= 'string' or type(cur_after) ~= 'string' then
             goto continue
         end
@@ -198,27 +229,25 @@ local function pool_suggestions(ctx, params, cur_before, cur_after)
         ) then
             goto continue
         end
-
         if type(entry.lines_before) ~= 'string' or type(cur_before) ~= 'string' then
             goto continue
         end
 
-        local typed_since_len = match_prefix_to_cached_suffix(entry.lines_before, cur_before)
+        local typed_since_len = match_prefix_to_cached_suffix(entry.lines_before, cur_before, hard_limit)
         if typed_since_len == nil then
             goto continue
         end
 
         local typed_since = cur_before:sub(typed_since_len + 1)
-        local stop_tokens = vim.deepcopy(params.stop_tokens or {})
-        vim.list_extend(stop_tokens, entry.params.stop_tokens or {})
 
-        -- Apply both the current request's and cached request's stop tokens so
-        -- cached completions remain reusable when the user narrows or widens the
-        -- requested stop constraint.
+        if #typed_since > soft_limit then
+            needs_refresh = true
+        end
+
         for _, comp in ipairs(entry.completions) do
             if comp:sub(1, #typed_since) == typed_since then
                 local effective = comp:sub(#typed_since + 1)
-                effective = truncate_at_stop_tokens(effective, stop_tokens)
+                effective = truncate_at_stop_tokens(effective, entry.params.stop_tokens)
 
                 if #effective > 0 and not seen[effective] then
                     seen[effective] = true
@@ -230,7 +259,7 @@ local function pool_suggestions(ctx, params, cur_before, cur_after)
         ::continue::
     end
 
-    return results
+    return results, needs_refresh
 end
 
 ---@class minuet.CacheEntry
@@ -245,6 +274,7 @@ end
 ---@field shown_choices? table<string, true>
 ---@field cache? minuet.CacheEntry[]
 ---@field last_trigger_params? table
+---@field last_trigger_was_manual? boolean
 ---@field n_retries? integer
 ---@field request_inflight? boolean
 ---@field pending_trigger? boolean
@@ -353,6 +383,7 @@ local function cleanup(ctx)
     ctx.request_inflight = nil
     ctx.pending_trigger = nil
     ctx.pending_overrides = nil
+    ctx.last_trigger_was_manual = nil
     clear_preview()
 end
 
@@ -363,7 +394,10 @@ end
 ---different provider/model/stop tokens without `change_model`/`change_provider`.
 ---@param is_retry? boolean When true this is an automatic cache-fill retry;
 ---n_retries is not reset.
-local function trigger(bufnr, overrides, is_retry)
+---@param is_manual? boolean When true the request was user-initiated (not the
+---auto-trigger debounce path). Manual completions remain visible while typing
+---even when auto-trigger is off.
+local function trigger(bufnr, overrides, is_retry, is_manual)
     if bufnr ~= api.nvim_get_current_buf() or vim.fn.mode() ~= 'i' then
         return
     end
@@ -384,6 +418,7 @@ local function trigger(bufnr, overrides, is_retry)
 
     if not is_retry then
         ctx.n_retries = 0
+        ctx.last_trigger_was_manual = is_manual or false
     end
     ctx.cache = ctx.cache or {}
 
@@ -398,13 +433,13 @@ local function trigger(bufnr, overrides, is_retry)
     -- Show any already-cached suggestions immediately while the request is in
     -- flight; also skip firing if the cache already satisfies n_completions.
     local n_completions = cfg.n_completions or 3
-    local cached = pool_suggestions(ctx, params, cur_before, cur_after)
+    local cached, needs_refresh = pool_suggestions(ctx, params, cur_before, cur_after, cfg)
     if #cached > 0 then
         ctx.suggestions = cached
         ctx.choice = ctx.choice or 1
         ctx.shown_choices = ctx.shown_choices or {}
         update_preview(ctx)
-        if not is_retry and #cached >= n_completions then
+        if not is_retry and #cached >= n_completions and not needs_refresh then
             return
         end
     end
@@ -463,7 +498,7 @@ local function trigger(bufnr, overrides, is_retry)
         -- user typed ahead while the request was in flight.
         local cmp_ctx_now = utils.make_cmp_context()
         local ctx_now = utils.get_context(cmp_ctx_now, cfg)
-        local effective = pool_suggestions(ctx, params, ctx_now.lines_before, ctx_now.lines_after)
+        local effective = pool_suggestions(ctx, params, ctx_now.lines_before, ctx_now.lines_after, cfg)
         if #effective > 0 then
             ctx.suggestions = effective
             if not ctx.choice or ctx.choice > #effective then
@@ -561,7 +596,7 @@ local action = {}
 ---one-off completions with a different provider/model/stop tokens.
 ---Bypasses auto-trigger gating (debounce/throttle/predicates).
 function action.fire(overrides)
-    trigger(api.nvim_get_current_buf(), overrides)
+    trigger(api.nvim_get_current_buf(), overrides, false, true)
 end
 
 ---@param overrides? table Optional config patch. Only used when no suggestion
@@ -843,14 +878,20 @@ function autocmd.on_cursor_moved_i()
     local bufnr = api.nvim_get_current_buf()
     local ctx = get_ctx(bufnr)
 
+    -- Only serve cached completions when auto-trigger is on, or when the user
+    -- explicitly fired a manual completion that is still "live" (not yet
+    -- dismissed by cleanup). This prevents stale ghost-text from appearing
+    -- while the user has auto-trigger deliberately turned off.
+    local can_show_cache = should_auto_trigger() or ctx.last_trigger_was_manual
+
     -- Check cache with the params from the last trigger. Using stored params
     -- (rather than re-resolving the config) means one-off completions fired
     -- with overridden model/stop-tokens keep working while the user types into
     -- them, without contaminating or being contaminated by the default cache.
-    if ctx.last_trigger_params then
+    if can_show_cache and ctx.last_trigger_params then
         local cfg = require('minuet').config
         local context = utils.get_context(utils.make_cmp_context(), cfg)
-        local effective = pool_suggestions(ctx, ctx.last_trigger_params, context.lines_before, context.lines_after)
+        local effective, needs_refresh = pool_suggestions(ctx, ctx.last_trigger_params, context.lines_before, context.lines_after, cfg)
         if #effective > 0 then
             ctx.suggestions = effective
             if not ctx.choice or ctx.choice > #effective then
@@ -858,7 +899,13 @@ function autocmd.on_cursor_moved_i()
             end
             ctx.shown_choices = ctx.shown_choices or {}
             update_preview(ctx)
-            stop_timer()
+            if needs_refresh and should_auto_trigger() then
+                -- Context drifted past soft limit: keep showing the cached
+                -- result but kick a fresh request in the background.
+                schedule()
+            else
+                stop_timer()
+            end
             return
         end
     end
