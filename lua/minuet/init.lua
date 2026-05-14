@@ -216,7 +216,12 @@ local function minuet_complete(arglead, cmdline, _)
         cmp = { enable = true, disable = true, toggle = true },
         blink = { enable = true, disable = true, toggle = true },
         duet = { predict = true, apply = true, dismiss = true },
-        virtualtext = { enable = true, disable = true, toggle = true },
+        virtualtext = {
+            enable = true,
+            disable = true,
+            toggle = true,
+            mode = { off = true, unintrusive = true, full = true },
+        },
         lsp = {
             attach = true,
             detach = true,
@@ -301,10 +306,16 @@ vim.api.nvim_create_user_command('Minuet', function(args)
         }
     end
 
+    local vt_action = require('minuet.virtualtext').action
     actions.virtualtext = {
-        enable = require('minuet.virtualtext').action.enable_auto_trigger,
-        disable = require('minuet.virtualtext').action.disable_auto_trigger,
-        toggle = require('minuet.virtualtext').action.toggle_auto_trigger,
+        enable = vt_action.enable_auto_trigger,
+        disable = vt_action.disable_auto_trigger,
+        toggle = vt_action.toggle_auto_trigger,
+        mode = {
+            off = function() vt_action.set_auto_trigger_mode 'off' end,
+            unintrusive = function() vt_action.set_auto_trigger_mode 'unintrusive' end,
+            full = function() vt_action.set_auto_trigger_mode 'full' end,
+        },
     }
 
     actions.lsp = require('minuet.lsp').actions

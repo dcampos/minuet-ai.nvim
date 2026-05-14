@@ -225,6 +225,16 @@ local M = {
         -- disabled. This option is useful when auto-completion is enabled for
         -- all file types i.e., when auto_trigger_ft = { '*' }
         auto_trigger_ignore_ft = {},
+        -- Auto-trigger mode applied to buffers matched by `auto_trigger_ft`.
+        --   'off'         - never auto-trigger (manual fires still work)
+        --   'unintrusive' - only auto-trigger when the text on the current
+        --                   line after the cursor is whitespace-only, so the
+        --                   ghost text never overlays existing code
+        --   'full'        - auto-trigger anywhere on the line
+        -- Switch at runtime with `:Minuet virtualtext mode {off|unintrusive|full}`
+        -- or `require('minuet.virtualtext').action.set_auto_trigger_mode(mode)`.
+        -- Per-buffer override: `vim.b.minuet_virtual_text_auto_trigger_mode`.
+        auto_trigger_mode = 'full',
         keymap = {
             accept = nil,
             accept_line = nil,

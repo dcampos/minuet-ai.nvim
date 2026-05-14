@@ -20,8 +20,26 @@ local internal = {
     is_on_throttle = false,
 }
 
+---@return 'off' | 'unintrusive' | 'full'
+local function auto_trigger_mode()
+    return vim.b.minuet_virtual_text_auto_trigger_mode or 'off'
+end
+
+-- True when auto-trigger should fire at the current cursor position.
+-- In 'unintrusive' mode the line text after the cursor must be whitespace-only
+-- (or the cursor must be at end of line); otherwise ghost text would overlay
+-- existing code.
 local function should_auto_trigger()
-    return vim.b.minuet_virtual_text_auto_trigger
+    local mode = auto_trigger_mode()
+    if mode == 'full' then
+        return true
+    end
+    if mode == 'unintrusive' then
+        local row, col = unpack(api.nvim_win_get_cursor(0))
+        local line = api.nvim_buf_get_lines(0, row - 1, row, false)[1] or ''
+        return line:sub(col + 1):match '^%s*$' ~= nil
+    end
+    return false
 end
 
 local function completion_menu_visible()
@@ -279,6 +297,7 @@ end
 ---@field request_inflight? boolean
 ---@field pending_trigger? boolean
 ---@field pending_overrides? table
+---@field pending_is_manual? boolean
 
 -- Resets display/active state. ctx.cache and ctx.last_trigger_params are
 -- intentionally preserved so cached completions remain available for the next
@@ -383,6 +402,7 @@ local function cleanup(ctx)
     ctx.request_inflight = nil
     ctx.pending_trigger = nil
     ctx.pending_overrides = nil
+    ctx.pending_is_manual = nil
     ctx.last_trigger_was_manual = nil
     clear_preview()
 end
@@ -413,6 +433,7 @@ local function trigger(bufnr, overrides, is_retry, is_manual)
     if ctx.request_inflight and not is_retry then
         ctx.pending_trigger = true
         ctx.pending_overrides = overrides
+        ctx.pending_is_manual = is_manual or false
         return
     end
 
@@ -525,11 +546,13 @@ local function trigger(bufnr, overrides, is_retry, is_manual)
 
             if ctx.pending_trigger then
                 local pending_overrides = ctx.pending_overrides
+                local pending_is_manual = ctx.pending_is_manual
                 ctx.pending_trigger = nil
                 ctx.pending_overrides = nil
+                ctx.pending_is_manual = nil
                 vim.schedule(function()
                     if api.nvim_get_current_buf() == bufnr and vim.fn.mode() == 'i' then
-                        trigger(bufnr, pending_overrides)
+                        trigger(bufnr, pending_overrides, false, pending_is_manual)
                     end
                 end)
             end
@@ -567,6 +590,10 @@ local function schedule()
             internal.is_on_throttle
             or (not show_on_completion_menu and completion_menu_visible())
             or (not utils.run_hooks_until_failure(config.enable_predicates))
+            -- Re-check at fire time: in 'unintrusive' mode the cursor may have
+            -- moved into a position with non-whitespace text after it during
+            -- the debounce window.
+            or (not should_auto_trigger())
         then
             return
         end
@@ -599,32 +626,41 @@ function action.fire(overrides)
     trigger(api.nvim_get_current_buf(), overrides, false, true)
 end
 
----@param overrides? table Optional config patch. Only used when no suggestion
----request has fired yet — when fresh suggestions must be requested. Once
----suggestions exist, calling next/prev cycles through them and overrides are
----ignored (the cached suggestions are reused).
-action.next = function(overrides)
+---@param overrides? table Optional config patch.
+---Behavior:
+---  * no suggestions yet → fire a trigger with overrides applied
+---  * suggestions visible and overrides resolve to a DIFFERENT param-set
+---    than the one that produced them (e.g. user is showing autotrigger
+---    results with stop=\n and presses a keymap that overrides stop=\n\n)
+---    → fire a fresh trigger so the user actually gets the variant they
+---    asked for, rather than cycling within the wrong set
+---  * suggestions visible and overrides match (or are absent) → cycle
+local function cycle_or_fetch(direction, overrides)
     local ctx = get_ctx()
 
-    -- no suggestion request yet
     if not ctx.suggestions then
-        trigger(api.nvim_get_current_buf(), overrides)
+        trigger(api.nvim_get_current_buf(), overrides, false, true)
         return
     end
 
-    advance(1, ctx)
+    if overrides then
+        local cfg = vim.tbl_deep_extend('force', require('minuet').config, overrides)
+        local new_params = extract_cache_params(cfg)
+        if not vim.deep_equal(new_params, ctx.last_trigger_params) then
+            trigger(api.nvim_get_current_buf(), overrides, false, true)
+            return
+        end
+    end
+
+    advance(direction, ctx)
+end
+
+action.next = function(overrides)
+    cycle_or_fetch(1, overrides)
 end
 
 action.prev = function(overrides)
-    local ctx = get_ctx()
-
-    -- no suggestion request yet
-    if not ctx.suggestions then
-        trigger(api.nvim_get_current_buf(), overrides)
-        return
-    end
-
-    advance(-1, ctx)
+    cycle_or_fetch(-1, overrides)
 end
 
 -- Insert the first n_chars of the current suggestion. ctx is NOT reset when
@@ -830,22 +866,50 @@ function action.is_visible()
     return not not api.nvim_buf_get_extmark_by_id(0, internal.ns_id, internal.extmark_id, { details = false })[1]
 end
 
-function action.disable_auto_trigger()
-    vim.b.minuet_virtual_text_auto_trigger = false
-    vim.notify('Minuet Virtual Text auto trigger disabled', vim.log.levels.INFO)
+---@param mode 'off' | 'unintrusive' | 'full'
+function action.set_auto_trigger_mode(mode)
+    if mode ~= 'off' and mode ~= 'unintrusive' and mode ~= 'full' then
+        vim.notify(
+            'Minuet Virtual Text auto trigger mode must be one of: off, unintrusive, full',
+            vim.log.levels.ERROR
+        )
+        return
+    end
+    vim.b.minuet_virtual_text_auto_trigger_mode = mode
+    -- Reflect the new mode on the display side: if the new state allows
+    -- auto-triggering at the current cursor position, fire a request right
+    -- away so the user does not have to type a character to see a completion.
+    -- Otherwise clear any currently visible ghost text so disabling /
+    -- switching to unintrusive over occupied text actually dismisses it.
+    if should_auto_trigger() then
+        trigger(api.nvim_get_current_buf(), nil, false, false)
+    else
+        cleanup(get_ctx())
+    end
+    vim.notify('Minuet Virtual Text auto trigger: ' .. mode, vim.log.levels.INFO)
 end
 
+function action.disable_auto_trigger()
+    action.set_auto_trigger_mode 'off'
+end
+
+-- Restore the mode configured in `config.virtualtext.auto_trigger_mode`.
+-- If the configured value is itself 'off', default to 'full' so a user who
+-- presses "enable" actually gets auto-triggering.
 function action.enable_auto_trigger()
-    vim.b.minuet_virtual_text_auto_trigger = true
-    vim.notify('Minuet Virtual Text auto trigger enabled', vim.log.levels.INFO)
+    local configured = require('minuet').config.virtualtext.auto_trigger_mode or 'full'
+    if configured == 'off' then
+        configured = 'full'
+    end
+    action.set_auto_trigger_mode(configured)
 end
 
 function action.toggle_auto_trigger()
-    vim.b.minuet_virtual_text_auto_trigger = not should_auto_trigger()
-    vim.notify(
-        'Minuet Virtual Text auto trigger ' .. (should_auto_trigger() and 'enabled' or 'disabled'),
-        vim.log.levels.INFO
-    )
+    if auto_trigger_mode() == 'off' then
+        action.enable_auto_trigger()
+    else
+        action.disable_auto_trigger()
+    end
 end
 
 M.action = action
@@ -1043,7 +1107,7 @@ function M.setup()
             pattern = config.virtualtext.auto_trigger_ft,
             callback = function()
                 if not vim.tbl_contains(config.virtualtext.auto_trigger_ignore_ft, vim.bo.ft) then
-                    vim.b.minuet_virtual_text_auto_trigger = true
+                    vim.b.minuet_virtual_text_auto_trigger_mode = config.virtualtext.auto_trigger_mode or 'full'
                 end
             end,
             group = M.augroup,

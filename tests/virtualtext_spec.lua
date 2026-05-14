@@ -187,6 +187,81 @@ return {
         end,
     },
     {
+        name = 'virtualtext.action.next fetches instead of cycling when overrides change cache params',
+        run = function()
+            helpers.setup_root_config {
+                provider = 'test',
+                debounce = 0,
+                throttle = 0,
+                n_completions = 2,
+                virtualtext = {
+                    debounce = 0,
+                    throttle = 0,
+                    max_retries = 0,
+                },
+                provider_options = {
+                    test = {
+                        model = 'fixture-model',
+                        optional = {
+                            stop = '\n',
+                        },
+                    },
+                },
+            }
+
+            local backend_calls = 0
+            local pending_callback
+
+            package.loaded['minuet.backends.test'] = {
+                complete = function(_, callback)
+                    backend_calls = backend_calls + 1
+                    if backend_calls == 1 then
+                        callback { 'alpha-one', 'alpha-two' }
+                    else
+                        pending_callback = callback
+                    end
+                end,
+            }
+
+            local virtualtext = helpers.reload 'minuet.virtualtext'
+            virtualtext.setup()
+
+            local bufnr = helpers.create_buffer({ 'alpha' }, { 1, 5 })
+            local original_mode = vim.fn.mode
+            vim.fn.mode = function()
+                return 'i'
+            end
+
+            virtualtext.action.fire()
+            helpers.expect_match(get_suggestion_text(bufnr, virtualtext.ns_id), '^alpha%-one')
+
+            virtualtext.action.next {
+                provider_options = {
+                    test = {
+                        optional = {
+                            stop = '\n\n',
+                        },
+                    },
+                },
+            }
+
+            helpers.expect_equal(backend_calls, 2, 'override request should fetch a fresh completion set')
+            helpers.expect_truthy(pending_callback, 'second backend request should still be in flight')
+            helpers.expect_match(
+                get_suggestion_text(bufnr, virtualtext.ns_id),
+                '^alpha%-one',
+                'override request should not cycle through the existing completion set'
+            )
+
+            pending_callback { 'paragraph-one', 'paragraph-two' }
+            helpers.expect_match(get_suggestion_text(bufnr, virtualtext.ns_id), '^paragraph%-one')
+
+            virtualtext.action.dismiss()
+            vim.fn.mode = original_mode
+            helpers.delete_buffer(bufnr)
+        end,
+    },
+    {
         name = 'virtualtext auto trigger fires immediately while typing when debounce and throttle are zero',
         run = function()
             helpers.setup_root_config {
@@ -213,7 +288,7 @@ return {
             virtualtext.setup()
 
             local bufnr = helpers.create_buffer({ 'alpha' }, { 1, 5 })
-            vim.b.minuet_virtual_text_auto_trigger = true
+            vim.b.minuet_virtual_text_auto_trigger_mode = 'full'
 
             local original_mode = vim.fn.mode
             vim.fn.mode = function()
@@ -227,6 +302,172 @@ return {
             helpers.expect_equal(backend_calls, 3, 'zero-debounce auto trigger should not be deferred until typing pauses')
 
             virtualtext.action.dismiss()
+            vim.fn.mode = original_mode
+            helpers.delete_buffer(bufnr)
+        end,
+    },
+    {
+        name = 'virtualtext unintrusive mode skips auto trigger when text follows the cursor',
+        run = function()
+            helpers.setup_root_config {
+                provider = 'test',
+                debounce = 0,
+                throttle = 0,
+                virtualtext = {
+                    debounce = 0,
+                    throttle = 0,
+                    max_retries = 0,
+                    auto_trigger_mode = 'unintrusive',
+                },
+            }
+
+            local backend_calls = 0
+            package.loaded['minuet.backends.test'] = {
+                complete = function(_, callback)
+                    backend_calls = backend_calls + 1
+                    callback {}
+                end,
+            }
+
+            local virtualtext = helpers.reload 'minuet.virtualtext'
+            virtualtext.setup()
+
+            -- Cursor in the middle of `foo(bar) ` between `(` and `bar`: text
+            -- after the cursor (`bar) `) is not whitespace-only, so
+            -- unintrusive mode should suppress auto-trigger.
+            local bufnr = helpers.create_buffer({ 'foo(bar) ' }, { 1, 4 })
+            vim.b.minuet_virtual_text_auto_trigger_mode = 'unintrusive'
+
+            local original_mode = vim.fn.mode
+            vim.fn.mode = function()
+                return 'i'
+            end
+
+            vim.api.nvim_exec_autocmds('CursorMovedI', { buffer = bufnr })
+            helpers.expect_equal(backend_calls, 0, 'unintrusive mode must not fire when non-whitespace follows the cursor')
+
+            -- Cursor on the trailing space at col 8: after-cursor is ` `,
+            -- whitespace-only, so unintrusive mode must trigger.
+            vim.api.nvim_win_set_cursor(0, { 1, 8 })
+            vim.api.nvim_exec_autocmds('CursorMovedI', { buffer = bufnr })
+            helpers.expect_equal(backend_calls, 1, 'unintrusive mode must fire when only whitespace follows')
+
+            virtualtext.action.dismiss()
+            vim.fn.mode = original_mode
+            helpers.delete_buffer(bufnr)
+        end,
+    },
+    {
+        name = 'virtualtext set_auto_trigger_mode switches the per-buffer mode',
+        run = function()
+            helpers.setup_root_config {
+                provider = 'test',
+                virtualtext = { auto_trigger_mode = 'full' },
+            }
+
+            local virtualtext = helpers.reload 'minuet.virtualtext'
+            virtualtext.setup()
+
+            local bufnr = helpers.create_buffer({ '' }, { 1, 0 })
+            local _, restore_notify = helpers.capture_notifications()
+            local original_mode = vim.fn.mode
+            vim.fn.mode = function()
+                return 'n'
+            end
+
+            virtualtext.action.set_auto_trigger_mode 'unintrusive'
+            helpers.expect_equal(vim.b[bufnr].minuet_virtual_text_auto_trigger_mode, 'unintrusive')
+
+            virtualtext.action.set_auto_trigger_mode 'off'
+            helpers.expect_equal(vim.b[bufnr].minuet_virtual_text_auto_trigger_mode, 'off')
+
+            virtualtext.action.set_auto_trigger_mode 'full'
+            helpers.expect_equal(vim.b[bufnr].minuet_virtual_text_auto_trigger_mode, 'full')
+
+            vim.fn.mode = original_mode
+            restore_notify()
+            helpers.delete_buffer(bufnr)
+        end,
+    },
+    {
+        name = 'virtualtext enable_auto_trigger immediately fires a completion',
+        run = function()
+            helpers.setup_root_config {
+                provider = 'test',
+                debounce = 0,
+                throttle = 0,
+                virtualtext = {
+                    debounce = 0,
+                    throttle = 0,
+                    max_retries = 0,
+                    auto_trigger_mode = 'full',
+                },
+            }
+
+            local backend_calls = 0
+            package.loaded['minuet.backends.test'] = {
+                complete = function(_, callback)
+                    backend_calls = backend_calls + 1
+                    callback { 'auto-fired' }
+                end,
+            }
+
+            local virtualtext = helpers.reload 'minuet.virtualtext'
+            virtualtext.setup()
+
+            local bufnr = helpers.create_buffer({ 'alpha' }, { 1, 5 })
+            vim.b.minuet_virtual_text_auto_trigger_mode = 'off'
+
+            local original_mode = vim.fn.mode
+            vim.fn.mode = function()
+                return 'i'
+            end
+
+            virtualtext.action.enable_auto_trigger()
+            helpers.expect_equal(backend_calls, 1, 'enabling auto-trigger should fire a completion immediately')
+            helpers.expect_truthy(virtualtext.action.is_visible(), 'ghost text should appear after enable')
+
+            virtualtext.action.dismiss()
+            vim.fn.mode = original_mode
+            helpers.delete_buffer(bufnr)
+        end,
+    },
+    {
+        name = 'virtualtext disable_auto_trigger dismisses currently visible ghost text',
+        run = function()
+            helpers.setup_root_config {
+                provider = 'test',
+                debounce = 0,
+                throttle = 0,
+                virtualtext = {
+                    debounce = 0,
+                    throttle = 0,
+                    max_retries = 0,
+                    auto_trigger_mode = 'full',
+                },
+            }
+
+            package.loaded['minuet.backends.test'] = {
+                complete = function(_, callback)
+                    callback { 'shown' }
+                end,
+            }
+
+            local virtualtext = helpers.reload 'minuet.virtualtext'
+            virtualtext.setup()
+
+            local bufnr = helpers.create_buffer({ 'alpha' }, { 1, 5 })
+            local original_mode = vim.fn.mode
+            vim.fn.mode = function()
+                return 'i'
+            end
+
+            virtualtext.action.fire()
+            helpers.expect_truthy(virtualtext.action.is_visible(), 'ghost text should be visible before disable')
+
+            virtualtext.action.disable_auto_trigger()
+            helpers.expect_falsy(virtualtext.action.is_visible(), 'disabling auto-trigger should hide ghost text')
+
             vim.fn.mode = original_mode
             helpers.delete_buffer(bufnr)
         end,

@@ -12,6 +12,12 @@ Fork of [milanglacier/minuet-ai.nvim](https://github.com/milanglacier/minuet-ai.
   with a different provider, model, or stop tokens without touching your
   global config. `minuet.with.{provider, model, optional, merge}` build the
   override tables.
+- **Unintrusive auto-trigger.** New `config.virtualtext.auto_trigger_mode`
+  with values `off` / `unintrusive` / `full`. In `unintrusive` mode the
+  plugin only auto-triggers when the line text after the cursor is
+  whitespace-only, so ghost text never overlays code you've already
+  written. Switch at runtime with
+  `:Minuet virtualtext mode {off|unintrusive|full}`.
 - **FIM whitespace is preserved.** Leading whitespace used to be stripped
   from FIM completions, corrupting indented output. It now passes through
   untouched.
@@ -705,6 +711,16 @@ default_config = {
         -- disabled. This option is useful when auto-completion is enabled for
         -- all file types i.e., when auto_trigger_ft = { '*' }
         auto_trigger_ignore_ft = {},
+        -- Auto-trigger mode applied to buffers matched by `auto_trigger_ft`.
+        --   'off'         - never auto-trigger (manual fires still work)
+        --   'unintrusive' - only auto-trigger when the text on the current
+        --                   line after the cursor is whitespace-only, so the
+        --                   ghost text never overlays existing code
+        --   'full'        - auto-trigger anywhere on the line
+        -- Switch at runtime with `:Minuet virtualtext mode {off|unintrusive|full}`
+        -- or `require('minuet.virtualtext').action.set_auto_trigger_mode(mode)`.
+        -- Per-buffer override: `vim.b.minuet_virtual_text_auto_trigger_mode`.
+        auto_trigger_mode = 'full',
         keymap = {
             accept = nil,
             accept_line = nil,
@@ -1401,6 +1417,13 @@ Enable or disable the automatic display of `virtual-text` completion in the
 
 Example usage: `Minuet virtualtext toggle`, `Minuet virtualtext enable`,
 `Minuet virtualtext disable`.
+
+Switch the auto-trigger mode for the **current buffer**:
+`Minuet virtualtext mode off`, `Minuet virtualtext mode unintrusive`,
+`Minuet virtualtext mode full`. In `unintrusive` mode the plugin only
+auto-triggers when the line text after the cursor is whitespace-only, so the
+ghost text never overlays existing code. The default is set via
+`config.virtualtext.auto_trigger_mode`.
 
 ## `Minuet duet`
 
