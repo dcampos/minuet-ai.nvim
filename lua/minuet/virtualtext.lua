@@ -251,12 +251,19 @@ local function pool_suggestions(ctx, params, cur_before, cur_after, cfg)
             goto continue
         end
 
-        local typed_since_len = match_prefix_to_cached_suffix(entry.lines_before, cur_before, hard_limit)
-        if typed_since_len == nil then
+        local overlap_len = match_prefix_to_cached_suffix(entry.lines_before, cur_before, hard_limit)
+        if overlap_len == nil then
             goto continue
         end
 
-        local typed_since = cur_before:sub(typed_since_len + 1)
+        local typed_since = cur_before:sub(overlap_len + 1)
+        -- Advancing the cursor may drop old context on the left, but that
+        -- dropped prefix must be balanced by newly typed text on the right.
+        -- Otherwise the cache entry was requested ahead of the current cursor.
+        local cache_only_prefix_len = #entry.lines_before - overlap_len
+        if cache_only_prefix_len > #typed_since then
+            goto continue
+        end
 
         if #typed_since > soft_limit then
             needs_refresh = true

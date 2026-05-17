@@ -187,6 +187,92 @@ return {
         end,
     },
     {
+        name = 'virtualtext cache keeps future entries but hides them after backspace',
+        run = function()
+            helpers.setup_root_config {
+                provider = 'test',
+                debounce = 0,
+                throttle = 0,
+                n_completions = 1,
+                virtualtext = {
+                    debounce = 0,
+                    throttle = 0,
+                    max_retries = 0,
+                },
+                provider_options = {
+                    test = {
+                        model = 'fixture-model',
+                        optional = {},
+                    },
+                },
+            }
+
+            local real_utils = require 'minuet.utils'
+            local current_context = {
+                lines_before = 'abcabc',
+                lines_after = 'tail',
+                opts = {},
+            }
+
+            package.loaded['minuet.utils'] = setmetatable({
+                get_context = function()
+                    return current_context
+                end,
+            }, { __index = real_utils })
+
+            local backend_calls = 0
+
+            package.loaded['minuet.backends.test'] = {
+                complete = function(_, callback)
+                    backend_calls = backend_calls + 1
+                    callback { 'future-derived' }
+                end,
+            }
+
+            local virtualtext = helpers.reload 'minuet.virtualtext'
+            virtualtext.setup()
+
+            local bufnr = helpers.create_buffer({ 'abcabc' }, { 1, 6 })
+            local original_mode = vim.fn.mode
+            vim.fn.mode = function()
+                return 'i'
+            end
+
+            virtualtext.action.fire()
+            helpers.expect_match(get_suggestion_text(bufnr, virtualtext.ns_id), '^future%-derived')
+
+            current_context = {
+                lines_before = 'abc',
+                lines_after = 'tail',
+                opts = {},
+            }
+            vim.api.nvim_buf_set_lines(bufnr, 0, -1, false, { 'abc' })
+            vim.api.nvim_win_set_cursor(0, { 1, 3 })
+            vim.api.nvim_exec_autocmds('CursorMovedI', { buffer = bufnr })
+
+            helpers.expect_falsy(
+                virtualtext.action.is_visible(),
+                'cache entries requested ahead of the current cursor must not render'
+            )
+
+            current_context = {
+                lines_before = 'abcabc',
+                lines_after = 'tail',
+                opts = {},
+            }
+            vim.api.nvim_buf_set_lines(bufnr, 0, -1, false, { 'abcabc' })
+            vim.api.nvim_win_set_cursor(0, { 1, 6 })
+            virtualtext.action.fire()
+
+            helpers.expect_equal(backend_calls, 1, 'hidden future entry should remain cached')
+            helpers.expect_match(get_suggestion_text(bufnr, virtualtext.ns_id), '^future%-derived')
+
+            virtualtext.action.dismiss()
+            vim.fn.mode = original_mode
+            helpers.delete_buffer(bufnr)
+        end,
+    },
+    {
         name = 'virtualtext.action.next fetches instead of cycling when overrides change cache params',
         run = function()
             helpers.setup_root_config {
