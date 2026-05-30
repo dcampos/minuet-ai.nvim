@@ -558,4 +558,53 @@ return {
             helpers.delete_buffer(bufnr)
         end,
     },
+    {
+        name = 'virtualtext disable_auto_trigger ignores in-flight auto-trigger callbacks',
+        run = function()
+            helpers.setup_root_config {
+                provider = 'test',
+                debounce = 0,
+                throttle = 0,
+                virtualtext = {
+                    debounce = 0,
+                    throttle = 0,
+                    max_retries = 0,
+                    auto_trigger_mode = 'full',
+                },
+            }
+
+            local backend_calls = 0
+            local pending_callback
+            package.loaded['minuet.backends.test'] = {
+                complete = function(_, callback)
+                    backend_calls = backend_calls + 1
+                    pending_callback = callback
+                end,
+            }
+
+            local virtualtext = helpers.reload 'minuet.virtualtext'
+            virtualtext.setup()
+
+            local bufnr = helpers.create_buffer({ 'alpha' }, { 1, 5 })
+            local original_mode = vim.fn.mode
+            vim.fn.mode = function()
+                return 'i'
+            end
+
+            virtualtext.action.set_auto_trigger_mode 'full'
+            helpers.expect_equal(backend_calls, 1, 'auto-trigger should start one backend request')
+            helpers.expect_truthy(pending_callback, 'backend request should be in flight')
+
+            virtualtext.action.disable_auto_trigger()
+            pending_callback { 'stale' }
+
+            helpers.expect_falsy(
+                virtualtext.action.is_visible(),
+                'late auto-trigger callback should not show ghost text after disable'
+            )
+
+            vim.fn.mode = original_mode
+            helpers.delete_buffer(bufnr)
+        end,
+    },
 }

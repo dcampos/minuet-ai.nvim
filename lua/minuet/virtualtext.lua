@@ -302,9 +302,19 @@ end
 ---@field last_trigger_was_manual? boolean
 ---@field n_retries? integer
 ---@field request_inflight? boolean
+---@field request_generation? integer
 ---@field pending_trigger? boolean
 ---@field pending_overrides? table
 ---@field pending_is_manual? boolean
+
+-- Provider callbacks capture this token; cleanup bumps it so in-flight
+-- callbacks cannot repaint stale ghost text after dismissal or deactivation.
+---@param ctx minuet.VirtualtextSuggestionContext
+---@return integer
+local function bump_request_generation(ctx)
+    ctx.request_generation = (ctx.request_generation or 0) + 1
+    return ctx.request_generation
+end
 
 -- Resets display/active state. ctx.cache and ctx.last_trigger_params are
 -- intentionally preserved so cached completions remain available for the next
@@ -405,6 +415,7 @@ end
 local function cleanup(ctx)
     ctx = ctx or get_ctx()
     stop_timer()
+    bump_request_generation(ctx)
     reset_ctx(ctx)
     ctx.request_inflight = nil
     ctx.pending_trigger = nil
@@ -413,7 +424,6 @@ local function cleanup(ctx)
     ctx.last_trigger_was_manual = nil
     clear_preview()
 end
-
 
 ---@param bufnr integer
 ---@param overrides? table Optional partial config patch, deep-merged onto the
@@ -475,9 +485,13 @@ local function trigger(bufnr, overrides, is_retry, is_manual)
     local provider = require('minuet.backends.' .. cfg.provider)
 
     ctx.request_inflight = true
+    local request_generation = bump_request_generation(ctx)
 
     provider.complete(context, function(data, done)
         if api.nvim_get_current_buf() ~= bufnr then
+            return
+        end
+        if ctx.request_generation ~= request_generation then
             return
         end
 
@@ -558,7 +572,11 @@ local function trigger(bufnr, overrides, is_retry, is_manual)
                 ctx.pending_overrides = nil
                 ctx.pending_is_manual = nil
                 vim.schedule(function()
-                    if api.nvim_get_current_buf() == bufnr and vim.fn.mode() == 'i' then
+                    if
+                        ctx.request_generation == request_generation
+                        and api.nvim_get_current_buf() == bufnr
+                        and vim.fn.mode() == 'i'
+                    then
                         trigger(bufnr, pending_overrides, false, pending_is_manual)
                     end
                 end)
