@@ -163,16 +163,20 @@ function M.complete_openai_fim_base(options, get_text_fn, context, callback, cfg
 
     local transformed_data = common.apply_transforms(options.transform, end_point, headers, data)
 
-    local data_file = utils.make_tmp_file(transformed_data.body)
-
-    if data_file == nil then
-        return
+    local n_completions = config.n_completions
+    local data_files = {}
+    for _ = 1, n_completions do
+        local data_file = utils.make_tmp_file(transformed_data.body)
+        if data_file == nil then
+            for _, file in ipairs(data_files) do
+                os.remove(file)
+            end
+            return
+        end
+        table.insert(data_files, data_file)
     end
 
-    local args = utils.make_curl_args(transformed_data.end_point, transformed_data.headers, data_file, config)
-
     local items = {}
-    local n_completions = config.n_completions
     local finished = 0
 
     local provider_name = 'openai_fim_compatible'
@@ -187,6 +191,9 @@ function M.complete_openai_fim_base(options, get_text_fn, context, callback, cfg
     })
 
     for idx = 1, n_completions do
+        local data_file = data_files[idx]
+        local args = utils.make_curl_args(transformed_data.end_point, transformed_data.headers, data_file, config)
+
         local new_job = common.start_job(config.curl_cmd, args, {
             on_exit = function(_, out)
                 utils.run_event('MinuetRequestFinished', {
