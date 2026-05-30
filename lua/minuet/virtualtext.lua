@@ -726,27 +726,39 @@ local function accept_n_chars(n_chars)
 end
 
 -- Returns the byte length of the next "word unit" in s: optional leading
--- whitespace followed by either a run of word chars (\w) or a single
+-- whitespace followed by either a run of keyword chars or a single
 -- non-word char. Returns nil when s is empty.
 local function next_word_end(s)
-    if #s == 0 then
+    local n_chars = vim.fn.strchars(s)
+    if n_chars == 0 then
         return nil
     end
-    local i = 1
-    while i <= #s and s:sub(i, i):match '%s' do
-        i = i + 1
+
+    local char_idx = 0
+    while char_idx < n_chars do
+        local char = vim.fn.strcharpart(s, char_idx, 1)
+        if vim.fn.match(char, [[^\s$]]) ~= 0 then
+            break
+        end
+        char_idx = char_idx + 1
     end
-    if i > #s then
+    if char_idx >= n_chars then
         return #s
     end
-    if s:sub(i, i):match '%w' then
-        while i <= #s and s:sub(i, i):match '%w' do
-            i = i + 1
+
+    local char = vim.fn.strcharpart(s, char_idx, 1)
+    if vim.fn.match(char, [[^\k$]]) == 0 then
+        while char_idx < n_chars do
+            char = vim.fn.strcharpart(s, char_idx, 1)
+            if vim.fn.match(char, [[^\k$]]) ~= 0 then
+                break
+            end
+            char_idx = char_idx + 1
         end
     else
-        i = i + 1
+        char_idx = char_idx + 1
     end
-    return i - 1
+    return vim.str_byteindex(s, char_idx)
 end
 
 -- Returns the byte index of the end of the nth word unit in s.
@@ -849,12 +861,12 @@ function action.accept_until_char()
         return
     end
 
-    local idx = suggestion:find(char, 1, true)
-    if not idx then
+    local _, end_idx = suggestion:find(char, 1, true)
+    if not end_idx then
         return
     end
 
-    accept_n_chars(idx)
+    accept_n_chars(end_idx)
 end
 
 function action.accept_n_lines()

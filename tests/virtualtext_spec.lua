@@ -607,4 +607,91 @@ return {
             helpers.delete_buffer(bufnr)
         end,
     },
+    {
+        name = 'virtualtext accept_word handles multibyte keyword characters',
+        run = function()
+            helpers.setup_root_config {
+                provider = 'test',
+                debounce = 0,
+                throttle = 0,
+                virtualtext = {
+                    debounce = 0,
+                    throttle = 0,
+                    max_retries = 0,
+                },
+            }
+
+            package.loaded['minuet.backends.test'] = {
+                complete = function(_, callback)
+                    callback { ' condición = true' }
+                end,
+            }
+
+            local virtualtext = helpers.reload 'minuet.virtualtext'
+            virtualtext.setup()
+
+            local bufnr = helpers.create_buffer({ '' }, { 1, 0 })
+            local original_mode = vim.fn.mode
+            vim.fn.mode = function()
+                return 'i'
+            end
+
+            virtualtext.action.fire()
+            virtualtext.action.accept_word()
+
+            helpers.wait_until(function()
+                return vim.api.nvim_buf_get_lines(bufnr, 0, 1, false)[1] == ' condición'
+            end, 1000, 'accept_word should insert the full multibyte word')
+
+            virtualtext.action.dismiss()
+            vim.fn.mode = original_mode
+            helpers.delete_buffer(bufnr)
+        end,
+    },
+    {
+        name = 'virtualtext accept_until_char includes a multibyte target character',
+        run = function()
+            helpers.setup_root_config {
+                provider = 'test',
+                debounce = 0,
+                throttle = 0,
+                virtualtext = {
+                    debounce = 0,
+                    throttle = 0,
+                    max_retries = 0,
+                },
+            }
+
+            package.loaded['minuet.backends.test'] = {
+                complete = function(_, callback)
+                    callback { 'condición' }
+                end,
+            }
+
+            local virtualtext = helpers.reload 'minuet.virtualtext'
+            virtualtext.setup()
+
+            local bufnr = helpers.create_buffer({ '' }, { 1, 0 })
+            local original_mode = vim.fn.mode
+            local original_getcharstr = vim.fn.getcharstr
+            vim.fn.mode = function()
+                return 'i'
+            end
+            vim.fn.getcharstr = function()
+                return 'ó'
+            end
+
+            virtualtext.action.fire()
+            virtualtext.action.accept_until_char()
+
+            helpers.wait_until(function()
+                return vim.api.nvim_buf_get_lines(bufnr, 0, 1, false)[1] == 'condició'
+            end, 1000, 'accept_until_char should include the full multibyte target')
+
+            virtualtext.action.dismiss()
+            vim.fn.getcharstr = original_getcharstr
+            vim.fn.mode = original_mode
+            helpers.delete_buffer(bufnr)
+        end,
+    },
 }
