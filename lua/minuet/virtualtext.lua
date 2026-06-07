@@ -725,40 +725,24 @@ local function accept_n_chars(n_chars)
     end)
 end
 
--- Returns the byte length of the next "word unit" in s: optional leading
--- whitespace followed by either a run of keyword chars or a single
--- non-word char. Returns nil when s is empty.
+-- Returns the byte length of the next "word unit" in s, matching :h word /
+-- the `e` normal-mode motion: leading blanks (including EOL) followed by
+-- either a run of \k chars or a run of non-blank non-\k chars. Returns nil
+-- when s is empty or contains no word.
+--
+-- \_s is vim's whitespace-or-EOL class; \k\@!\S is "non-blank that is not a
+-- keyword char", so the second alternative groups runs of punctuation the way
+-- `e` does (e.g. `foo!!!bar` -> foo, !!!, bar). \k and \S handle multibyte
+-- input on their own, so no per-character walk is needed.
 local function next_word_end(s)
-    local n_chars = vim.fn.strchars(s)
-    if n_chars == 0 then
+    if #s == 0 then
         return nil
     end
-
-    local char_idx = 0
-    while char_idx < n_chars do
-        local char = vim.fn.strcharpart(s, char_idx, 1)
-        if vim.fn.match(char, [[^\s$]]) ~= 0 then
-            break
-        end
-        char_idx = char_idx + 1
+    local byte_end = vim.fn.matchend(s, [[^\_s*\(\k\+\|\%(\k\@!\S\)\+\)]])
+    if byte_end < 0 then
+        return nil
     end
-    if char_idx >= n_chars then
-        return #s
-    end
-
-    local char = vim.fn.strcharpart(s, char_idx, 1)
-    if vim.fn.match(char, [[^\k$]]) == 0 then
-        while char_idx < n_chars do
-            char = vim.fn.strcharpart(s, char_idx, 1)
-            if vim.fn.match(char, [[^\k$]]) ~= 0 then
-                break
-            end
-            char_idx = char_idx + 1
-        end
-    else
-        char_idx = char_idx + 1
-    end
-    return vim.str_byteindex(s, char_idx)
+    return byte_end
 end
 
 -- Returns the byte index of the end of the nth word unit in s.
