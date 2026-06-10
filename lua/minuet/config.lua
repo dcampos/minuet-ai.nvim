@@ -406,6 +406,18 @@ M.provider_options = {
         optional = {
             stop = nil, -- the identifier to stop the completion generation
             max_tokens = nil,
+            -- Routing hint that pins consecutive FIM requests to the same warm
+            -- prompt-cache replica (Mistral/OpenAI field, merged verbatim into
+            -- the request body). Paired with a stable prefix (see
+            -- virtualtext.context_growth_slack) it turns Codestral's
+            -- per-keystroke recompute into near-full prefix cache reuse;
+            -- without it ~43% of requests get load-balanced onto a cold
+            -- replica and recompute the whole prompt. A single shared value is
+            -- fine: caching is isolated per API key, and a shared key showed no
+            -- latency cost and no eviction of unrelated contexts in testing.
+            -- Set nil to disable. Provider-specific -- only send to endpoints
+            -- that accept this field.
+            prompt_cache_key = 'minuet-codestral',
         },
         -- a list of functions to transform the endpoint, header, and request body
         transform = {},
