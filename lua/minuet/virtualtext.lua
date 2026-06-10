@@ -300,6 +300,7 @@ end
 ---@field cache? minuet.CacheEntry[]
 ---@field last_trigger_params? table
 ---@field last_trigger_was_manual? boolean
+---@field last_anchor? { params: table, lines_before: string, lines_after: string }
 ---@field n_retries? integer
 ---@field request_inflight? boolean
 ---@field request_generation? integer
@@ -467,10 +468,26 @@ local function trigger(bufnr, overrides, is_retry, is_manual)
     end
     ctx.cache = ctx.cache or {}
 
-    local context = utils.get_context(utils.make_cmp_context(), cfg)
+    local params = extract_cache_params(cfg)
+
+    -- Anchor reuse: keep the FIM prompt prefix region byte-identical to the
+    -- previous request as long as the user is typing forward within slack.
+    -- This is what unlocks server-side KV cache hits across keystrokes; the
+    -- legacy fresh window slides on every typed char and never hits cache.
+    -- See utils.get_context for the SPM mechanics.
+    local growth_slack = (cfg.virtualtext or {}).context_growth_slack or 0
+    local anchor
+    if growth_slack > 0 and ctx.last_anchor and vim.deep_equal(ctx.last_anchor.params, params) then
+        anchor = {
+            prev_lines_before = ctx.last_anchor.lines_before,
+            prev_lines_after = ctx.last_anchor.lines_after,
+            growth_slack = growth_slack,
+        }
+    end
+
+    local context = utils.get_context(utils.make_cmp_context(), cfg, anchor)
     local cur_before = context.lines_before
     local cur_after = context.lines_after
-    local params = extract_cache_params(cfg)
 
     -- Remember which params were active so on_cursor_moved_i can match them.
     ctx.last_trigger_params = params
@@ -488,6 +505,17 @@ local function trigger(bufnr, overrides, is_retry, is_manual)
             return
         end
     end
+
+    -- We are about to dispatch the request — record what we sent so the next
+    -- trigger can anchor against it. Update unconditionally (even if the
+    -- request later fails): the server only caches what it actually saw, and
+    -- a stale anchor just means the next request misses cache, which is the
+    -- legacy behavior.
+    ctx.last_anchor = {
+        params = params,
+        lines_before = cur_before,
+        lines_after = cur_after,
+    }
 
     local provider = require('minuet.backends.' .. cfg.provider)
 

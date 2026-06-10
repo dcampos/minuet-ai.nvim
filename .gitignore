@@ -5,3 +5,4 @@
 .nvim.log
 /.codex
 nvim.log
+/scripts/*

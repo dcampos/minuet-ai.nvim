@@ -238,17 +238,6 @@ function M.make_cmp_context_from_lsp_params(params)
     return self
 end
 
---- Get the context around the cursor position for code completion
----@param cmp_context table The completion context object containing cursor position and line info
----@return table Context information with the following fields:
----   - lines_before: string - Text content before cursor, truncated based on context window size
----   - lines_after: string - Text content after cursor, truncated based on context window size
----   - opts: table - Options indicating if context was truncated:
----     - is_incomplete_before: boolean - True if content before cursor was truncated
----     - is_incomplete_after: boolean - True if content after cursor was truncated
----@param cmp_context table
----@param cfg? table Effective config (defaults to global). Pass an effective
----config to override values like context_window/context_ratio per call.
 local function collect_nearby_lines(bufnr, start_line, step, max_chars)
     local chunks = {}
     local chars = 0
@@ -289,21 +278,160 @@ local function collect_nearby_lines(bufnr, start_line, step, max_chars)
     return table.concat(chunks, '\n')
 end
 
-function M.get_context(cmp_context, cfg)
+-- Find the LATEST occurrence of prev_pre inside raw_before such that the
+-- text after the match (typed-since-anchor) is at most growth_slack chars.
+-- Returns raw_before:sub(match_start) on success, or nil.
+--
+-- This is what lets the new request reuse the same anchor as the previous
+-- one: the returned lines_before begins at the same buffer-content boundary
+-- as prev_pre, then extends by typed_since chars. The whole point is to keep
+-- the leading bytes of the FIM prompt byte-identical across requests so the
+-- server's KV cache stays warm.
+---@param raw_before string  buffer text up to cursor (fetched with extra slack)
+---@param prev_pre string  lines_before from the previous request
+---@param growth_slack integer max chars of new text past the anchor
+---@return string?
+local function extend_prefix_anchor(raw_before, prev_pre, growth_slack)
+    if type(prev_pre) ~= 'string' or prev_pre == '' then
+        return nil
+    end
+    local prev_blen = #prev_pre
+    local raw_blen = #raw_before
+    if prev_blen > raw_blen then
+        return nil
+    end
+
+    -- Earliest byte position the match could start while still keeping
+    -- typed_since within slack (worst case 4 bytes/char for UTF-8).
+    local earliest = raw_blen - prev_blen + 1 - growth_slack * 4
+    if earliest < 1 then
+        earliest = 1
+    end
+
+    local best
+    local pos = earliest
+    while true do
+        local found = raw_before:find(prev_pre, pos, true)
+        if not found then
+            break
+        end
+        local tail = raw_before:sub(found + prev_blen)
+        local typed_since = vim.fn.strchars(tail)
+        if typed_since <= growth_slack then
+            best = found
+        end
+        pos = found + 1
+    end
+
+    if best then
+        return raw_before:sub(best)
+    end
+    return nil
+end
+
+-- If raw_after starts with prev_suf, return prev_suf (the suffix is "still
+-- there"). Returns nil otherwise. While the user only types into the prefix
+-- region, the buffer past the cursor is unchanged in content, so the
+-- previous suffix string is still the right one to send — and keeping it
+-- byte-identical is what allows SPM models to reuse SUF KV across requests.
+---@param raw_after string buffer text from cursor onward
+---@param prev_suf string lines_after from the previous request
+---@return string?
+local function pin_suffix_anchor(raw_after, prev_suf)
+    if type(prev_suf) ~= 'string' or prev_suf == '' then
+        return nil
+    end
+    if #prev_suf > #raw_after then
+        return nil
+    end
+    if raw_after:sub(1, #prev_suf) == prev_suf then
+        return prev_suf
+    end
+    return nil
+end
+
+---@class minuet.ContextAnchor
+---@field prev_lines_before string lines_before sent in the previous request
+---@field prev_lines_after string lines_after sent in the previous request
+---@field growth_slack? integer Max new chars typed since the anchor before
+---we re-anchor. Defaults to 0 (only reuse when cursor hasn't moved).
+
+--- Get the context around the cursor position for code completion.
+---
+--- The optional `anchor` parameter keeps consecutive requests' prompt prefix
+--- region byte-stable so the server's KV cache stays warm across keystrokes.
+--- This matters most for SPM-trained FIM models: when the suffix segment is
+--- before the prefix segment, appending characters at the cursor edge only
+--- invalidates the trailing few tokens. Without an anchor, the legacy window
+--- slides on every keystroke and every request is a fresh cache miss. With
+--- one, we extend `prev_lines_before` by the typed-since chars and pin
+--- `prev_lines_after` until the suffix content stops matching or growth_slack
+--- is exceeded — at which point we re-anchor by falling back to the standard
+--- fresh window (single chunked invalidation rather than per-char).
+---@param cmp_context table Cursor + cursor_before_line/cursor_after_line.
+---@param cfg? table Effective config; overrides context_window/context_ratio.
+---@param anchor? minuet.ContextAnchor Previous request hint for cache reuse.
+---@return table { lines_before, lines_after, opts = { is_incomplete_before, is_incomplete_after, anchored? } }
+function M.get_context(cmp_context, cfg, anchor)
     local config = cfg or require('minuet').config
 
     local cursor = cmp_context.cursor
     local bufnr = 0
     local max_side_chars = config.context_window
 
-    local before_prefix = collect_nearby_lines(bufnr, cursor.line, -1, max_side_chars)
-    local after_suffix = collect_nearby_lines(bufnr, cursor.line + 1, 1, max_side_chars)
+    -- Pull a little extra so anchor extension can grow into slack on top of
+    -- the standard window. With no anchor, growth_slack == 0 reproduces the
+    -- legacy fetch size exactly.
+    local growth_slack = (anchor and anchor.growth_slack) or 0
+    local fetch_chars = max_side_chars + growth_slack
 
-    local lines_before = before_prefix .. '\n' .. cmp_context.cursor_before_line
-    local lines_after = cmp_context.cursor_after_line .. '\n' .. after_suffix
+    local before_prefix = collect_nearby_lines(bufnr, cursor.line, -1, fetch_chars)
+    local after_suffix = collect_nearby_lines(bufnr, cursor.line + 1, 1, fetch_chars)
 
-    local n_chars_before = vim.fn.strchars(lines_before)
-    local n_chars_after = vim.fn.strchars(lines_after)
+    local raw_before = before_prefix .. '\n' .. cmp_context.cursor_before_line
+    local raw_after = cmp_context.cursor_after_line .. '\n' .. after_suffix
+
+    local n_chars_before = vim.fn.strchars(raw_before)
+    local n_chars_after = vim.fn.strchars(raw_after)
+
+    -- Anchor reuse only helps when the fresh window would left-truncate the
+    -- prefix: that is the one case where the prefix slides and consecutive
+    -- fresh prompts shed their shared leading bytes (and the server's KV cache
+    -- with them). When the prefix already reaches the top of the buffer -- a
+    -- short file that fits whole in context_window, or the cursor near the top
+    -- of a long one -- the fresh window is already prefix-stable as you type
+    -- forward, so anchoring buys no cache warmth and would only risk dropping
+    -- text inserted above the cursor (a title, an import) from the prompt.
+    -- This condition mirrors when the truncation below sets is_incomplete_before.
+    local prefix_would_slide = n_chars_before + n_chars_after > config.context_window
+        and n_chars_before >= config.context_window * config.context_ratio
+
+    -- Try anchor reuse. Both prefix AND suffix anchors must match: SPM-style
+    -- KV reuse needs every token before MID to be at the same position with
+    -- the same content. Mismatch on either side means we'd lose cache from
+    -- the mismatch onwards, so we may as well re-anchor cleanly.
+    if prefix_would_slide and anchor and anchor.prev_lines_before and anchor.prev_lines_after then
+        local pre = extend_prefix_anchor(raw_before, anchor.prev_lines_before, growth_slack)
+        local suf = pin_suffix_anchor(raw_after, anchor.prev_lines_after)
+        if pre and suf then
+            return {
+                lines_before = pre,
+                lines_after = suf,
+                opts = {
+                    -- An anchor-reused context is, by construction, the same
+                    -- window the previous request opened (just grown at the
+                    -- cursor edge). Truncation didn't happen this turn.
+                    is_incomplete_before = false,
+                    is_incomplete_after = false,
+                    anchored = true,
+                },
+            }
+        end
+    end
+
+    -- Re-anchor path: standard fresh window centered on cursor.
+    local lines_before = raw_before
+    local lines_after = raw_after
 
     local opts = {
         is_incomplete_before = false,

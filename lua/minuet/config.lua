@@ -266,6 +266,35 @@ local M = {
         -- within cache_max_chars_ahead), the cached completion is shown but a
         -- background re-fetch is also fired.
         cache_soft_chars_ahead = 20,
+        -- Context anchor reuse: how many chars of new typing the request
+        -- prefix is allowed to grow past the previous request's prefix before
+        -- we re-anchor (drop a chunk of oldest chars). Each anchored request
+        -- keeps the prompt prefix region byte-identical to the previous one so
+        -- the server's KV cache stays warm across keystrokes. This helps any
+        -- FIM model: with the legacy sliding window the prefix shifts on every
+        -- keystroke and the server caches nothing; an anchor lets the
+        -- prefix-region tokens be reused. It is especially valuable for
+        -- SPM-ordered prompts (suffix before prefix), where appending at the
+        -- cursor edge doesn't invalidate suffix tokens either. 0 disables the
+        -- feature (legacy behavior: window slides on every keystroke).
+        --
+        -- The anchor only engages when the file is long enough that the
+        -- context window truncates the prefix. Files that fit entirely within
+        -- `context_window` are always sent fresh (they stay prefix-stable on
+        -- their own as you type forward), so short files are unaffected -- and
+        -- text inserted above the cursor, like a new title, is never clipped.
+        --
+        -- Sizing: treat this as part of your context budget. While anchored,
+        -- the prompt can exceed `context_window` by up to this many chars, and
+        -- each request fetches `context_window + context_growth_slack` chars
+        -- per side. So the effective max prompt is `context_window +
+        -- context_growth_slack`. Keep the slack a small fraction of
+        -- `context_window`: with a large window (the 16000 default) 512 is
+        -- ~3%, but with a small window for a local model (e.g. 512) a 1024
+        -- slack would dominate the prompt and blow your token/latency budget —
+        -- scale it down or set it to 0. Re-anchoring is a single chunked cache
+        -- miss rather than a per-char one.
+        context_growth_slack = 512,
     },
     provider = 'codestral',
     -- the maximum total characters of the context before and after the cursor
