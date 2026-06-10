@@ -809,4 +809,84 @@ return {
             helpers.delete_buffer(bufnr)
         end,
     },
+    {
+        name = 'virtualtext fires concurrent requests and an older one still lands matching typed-ahead text',
+        run = function()
+            helpers.setup_root_config {
+                provider = 'test',
+                debounce = 0,
+                throttle = 0,
+                n_completions = 1,
+                virtualtext = {
+                    debounce = 0,
+                    throttle = 0,
+                    max_retries = 0,
+                    auto_trigger_mode = 'full',
+                },
+                provider_options = {
+                    test = {
+                        model = 'fixture-model',
+                        optional = {},
+                    },
+                },
+            }
+
+            -- get_context is driven by this closure var so we can advance the
+            -- "cursor" between keystrokes without touching the real buffer.
+            local real_utils = require 'minuet.utils'
+            local before = 'a'
+            package.loaded['minuet.utils'] = setmetatable({
+                get_context = function()
+                    return { lines_before = before, lines_after = '', opts = {} }
+                end,
+            }, { __index = real_utils })
+
+            -- The fake backend never invokes its callback on its own, so every
+            -- request stays "in flight" until the test drives it manually.
+            local backend_calls = 0
+            local pending = {}
+            package.loaded['minuet.backends.test'] = {
+                complete = function(_, callback)
+                    backend_calls = backend_calls + 1
+                    table.insert(pending, callback)
+                end,
+            }
+
+            local virtualtext = helpers.reload 'minuet.virtualtext'
+            virtualtext.setup()
+
+            local bufnr = helpers.create_buffer({ 'a' }, { 1, 1 })
+            vim.b.minuet_virtual_text_auto_trigger_mode = 'full'
+            local original_mode = vim.fn.mode
+            vim.fn.mode = function()
+                return 'i'
+            end
+
+            -- First keystroke: cache miss -> request #1, left in flight.
+            before = 'a'
+            vim.api.nvim_exec_autocmds('CursorMovedI', { buffer = bufnr })
+            -- Second keystroke at a new position while #1 is still pending and
+            -- nothing has been cached yet: it must fire its own request rather
+            -- than queue behind the first (the old serialization bug).
+            before = 'ab'
+            vim.api.nvim_exec_autocmds('CursorMovedI', { buffer = bufnr })
+
+            helpers.expect_equal(backend_calls, 2, 'second keystroke must fire its own request, not queue behind the first')
+            helpers.expect_equal(#pending, 2, 'both requests should be in flight concurrently')
+
+            -- The OLDER request (fired when before='a') returns and "guesses"
+            -- the char typed since: its completion 'bc' begins with the
+            -- typed-since 'b', so the remaining 'c' should surface as ghost text.
+            pending[1] { 'bc' }
+            helpers.expect_match(
+                get_suggestion_text(bufnr, virtualtext.ns_id),
+                '^c',
+                'an older in-flight request must still land in the cache and match typed-ahead text'
+            )
+
+            virtualtext.action.dismiss()
+            vim.fn.mode = original_mode
+            helpers.delete_buffer(bufnr)
+        end,
+    },
 }

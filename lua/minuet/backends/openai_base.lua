@@ -138,7 +138,13 @@ end
 function M.complete_openai_fim_base(options, get_text_fn, context, callback, cfg)
     local config = cfg or require('minuet').config
 
-    common.terminate_all_jobs()
+    -- Callers that fire one request per keystroke (virtual text) set
+    -- keep_existing_jobs so earlier in-flight requests are not cancelled and can
+    -- still return a completion matching what the user types next. cmp / duet
+    -- leave it unset and keep the cancel-the-previous-request behavior.
+    if not (context.opts and context.opts.keep_existing_jobs) then
+        common.terminate_all_jobs()
+    end
 
     local data = {}
 

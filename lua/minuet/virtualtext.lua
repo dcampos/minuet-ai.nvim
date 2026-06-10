@@ -302,14 +302,13 @@ end
 ---@field last_trigger_was_manual? boolean
 ---@field last_anchor? { params: table, lines_before: string, lines_after: string }
 ---@field n_retries? integer
----@field request_inflight? boolean
 ---@field request_generation? integer
----@field pending_trigger? boolean
----@field pending_overrides? table
----@field pending_is_manual? boolean
 
--- Provider callbacks capture this token; cleanup bumps it so in-flight
--- callbacks cannot repaint stale ghost text after dismissal or deactivation.
+-- Provider callbacks capture this token; a *hard* cleanup bumps it so in-flight
+-- callbacks cannot repaint ghost text after an explicit dismiss / insert-leave.
+-- Concurrent requests fired while typing share one generation (trigger does NOT
+-- bump it), so each still lands its result in the cache and may repaint if it
+-- matches the live cursor; only a dismiss invalidates them all at once.
 ---@param ctx minuet.VirtualtextSuggestionContext
 ---@return integer
 local function bump_request_generation(ctx)
@@ -421,13 +420,14 @@ end
 local function cleanup(ctx, soft)
     ctx = ctx or get_ctx()
     stop_timer()
-    bump_request_generation(ctx)
     reset_ctx(ctx)
-    ctx.request_inflight = nil
-    ctx.pending_trigger = nil
-    ctx.pending_overrides = nil
-    ctx.pending_is_manual = nil
+    -- Only a hard cleanup (explicit dismiss, insert/buf-leave) invalidates
+    -- in-flight requests. A soft cleanup is the auto path clearing a no-longer-
+    -- matching ghost text mid-typing; bumping the generation there would discard
+    -- the results of requests fired for earlier keystrokes, which we now want to
+    -- keep so they can still land in the cache and match as the user types on.
     if not soft then
+        bump_request_generation(ctx)
         ctx.last_trigger_was_manual = nil
     end
     clear_preview()
@@ -455,12 +455,6 @@ local function trigger(bufnr, overrides, is_retry, is_manual)
     end
 
     local ctx = get_ctx(bufnr)
-    if ctx.request_inflight and not is_retry then
-        ctx.pending_trigger = true
-        ctx.pending_overrides = overrides
-        ctx.pending_is_manual = is_manual or false
-        return
-    end
 
     if not is_retry then
         ctx.n_retries = 0
@@ -486,6 +480,12 @@ local function trigger(bufnr, overrides, is_retry, is_manual)
     end
 
     local context = utils.get_context(utils.make_cmp_context(), cfg, anchor)
+    -- Virtual text fires one request per keystroke that misses the cache and
+    -- lets them run concurrently, so the backend must NOT terminate the jobs of
+    -- earlier in-flight requests: any of them may still return a completion that
+    -- matches what the user types next. (cmp / duet leave this unset and keep
+    -- the cancel-the-previous-request behavior.)
+    context.opts.keep_existing_jobs = true
     local cur_before = context.lines_before
     local cur_after = context.lines_after
 
@@ -519,14 +519,14 @@ local function trigger(bufnr, overrides, is_retry, is_manual)
 
     local provider = require('minuet.backends.' .. cfg.provider)
 
-    ctx.request_inflight = true
-    local request_generation = bump_request_generation(ctx)
+    -- Capture (do not bump) the current generation: concurrent in-flight
+    -- requests share it, so each one's callback runs and caches its result.
+    -- A hard cleanup bumps the generation to invalidate them all at once.
+    ctx.request_generation = ctx.request_generation or 0
+    local request_generation = ctx.request_generation
 
     provider.complete(context, function(data, done)
         if api.nvim_get_current_buf() ~= bufnr then
-            return
-        end
-        if ctx.request_generation ~= request_generation then
             return
         end
 
@@ -571,6 +571,14 @@ local function trigger(bufnr, overrides, is_retry, is_manual)
             table.remove(cache, 1)
         end
 
+        -- Caching above always runs so a request fired for an earlier keystroke
+        -- still lands its completion. Painting and retrying, though, are display
+        -- concerns: skip them once a hard cleanup (dismiss / insert-leave) has
+        -- invalidated this request's generation.
+        if ctx.request_generation ~= request_generation then
+            return
+        end
+
         -- Re-read cursor position so we don't flash stale ghost-text when the
         -- user typed ahead while the request was in flight.
         local cmp_ctx_now = utils.make_cmp_context()
@@ -586,35 +594,14 @@ local function trigger(bufnr, overrides, is_retry, is_manual)
         end
 
         if done ~= false then
-            ctx.request_inflight = false
-
             local max_retries = cfg.virtualtext.max_retries or 3
             local n_retries = ctx.n_retries or 0
-            if (not ctx.pending_trigger)
-                and next(data)
+            if next(data)
                 and #(ctx.suggestions or {}) < n_completions
                 and n_retries < max_retries
             then
                 ctx.n_retries = n_retries + 1
                 trigger(bufnr, overrides, true)
-                return
-            end
-
-            if ctx.pending_trigger then
-                local pending_overrides = ctx.pending_overrides
-                local pending_is_manual = ctx.pending_is_manual
-                ctx.pending_trigger = nil
-                ctx.pending_overrides = nil
-                ctx.pending_is_manual = nil
-                vim.schedule(function()
-                    if
-                        ctx.request_generation == request_generation
-                        and api.nvim_get_current_buf() == bufnr
-                        and vim.fn.mode() == 'i'
-                    then
-                        trigger(bufnr, pending_overrides, false, pending_is_manual)
-                    end
-                end)
             end
         end
     end, cfg)
