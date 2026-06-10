@@ -694,4 +694,119 @@ return {
             helpers.delete_buffer(bufnr)
         end,
     },
+    {
+        name = 'virtualtext consecutive accept_word inserts successive words from the same suggestion',
+        run = function()
+            helpers.setup_root_config {
+                provider = 'test',
+                debounce = 0,
+                throttle = 0,
+                virtualtext = {
+                    debounce = 0,
+                    throttle = 0,
+                    max_retries = 0,
+                },
+            }
+
+            local backend_calls = 0
+            package.loaded['minuet.backends.test'] = {
+                complete = function(_, callback)
+                    backend_calls = backend_calls + 1
+                    callback { 'foo bar baz' }
+                end,
+            }
+
+            local virtualtext = helpers.reload 'minuet.virtualtext'
+            virtualtext.setup()
+
+            local bufnr = helpers.create_buffer({ '' }, { 1, 0 })
+            -- Real headless nvim is in normal mode; mode() is mocked to 'i' so
+            -- triggers fire, but nvim_win_set_cursor still clamps to the last
+            -- char position. virtualedit=onemore lets the cursor sit one past
+            -- the end of line, matching real insert-mode behavior so the next
+            -- accept inserts at the right column.
+            local original_ve = vim.o.virtualedit
+            vim.o.virtualedit = 'onemore'
+            local original_mode = vim.fn.mode
+            vim.fn.mode = function()
+                return 'i'
+            end
+
+            virtualtext.action.fire()
+            virtualtext.action.accept_word()
+            virtualtext.action.accept_word()
+            virtualtext.action.accept_word()
+
+            helpers.wait_until(function()
+                return vim.api.nvim_buf_get_lines(bufnr, 0, 1, false)[1] == 'foo bar baz'
+            end, 1000, 'three consecutive accept_word should insert all three words in order')
+
+            helpers.expect_equal(
+                backend_calls,
+                1,
+                'no extra backend round-trip should be needed between accepts'
+            )
+
+            virtualtext.action.dismiss()
+            vim.fn.mode = original_mode
+            vim.o.virtualedit = original_ve
+            helpers.delete_buffer(bufnr)
+        end,
+    },
+    {
+        name = 'virtualtext consecutive accept_word survives past the cache drift hard limit',
+        run = function()
+            helpers.setup_root_config {
+                provider = 'test',
+                debounce = 0,
+                throttle = 0,
+                virtualtext = {
+                    debounce = 0,
+                    throttle = 0,
+                    max_retries = 0,
+                    cache_max_chars_ahead = 10,
+                    cache_soft_chars_ahead = 5,
+                },
+            }
+
+            local backend_calls = 0
+            package.loaded['minuet.backends.test'] = {
+                complete = function(_, callback)
+                    backend_calls = backend_calls + 1
+                    callback { 'one two three four five' }
+                end,
+            }
+
+            local virtualtext = helpers.reload 'minuet.virtualtext'
+            virtualtext.setup()
+
+            local bufnr = helpers.create_buffer({ '' }, { 1, 0 })
+            local original_ve = vim.o.virtualedit
+            vim.o.virtualedit = 'onemore'
+            local original_mode = vim.fn.mode
+            vim.fn.mode = function()
+                return 'i'
+            end
+
+            virtualtext.action.fire()
+            for _ = 1, 5 do
+                virtualtext.action.accept_word()
+            end
+
+            helpers.wait_until(function()
+                return vim.api.nvim_buf_get_lines(bufnr, 0, 1, false)[1] == 'one two three four five'
+            end, 1000, 'five accept_word calls should insert the whole 23-char suggestion despite the 10-char drift limit')
+
+            helpers.expect_equal(
+                backend_calls,
+                1,
+                'cache-slide should keep one round-trip enough even past the drift limit'
+            )
+
+            virtualtext.action.dismiss()
+            vim.fn.mode = original_mode
+            vim.o.virtualedit = original_ve
+            helpers.delete_buffer(bufnr)
+        end,
+    },
 }

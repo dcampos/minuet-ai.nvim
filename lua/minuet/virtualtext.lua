@@ -412,7 +412,12 @@ local function update_preview(ctx)
 end
 
 ---@param ctx? minuet.VirtualtextSuggestionContext
-local function cleanup(ctx)
+---@param soft? boolean When true, preserve `ctx.last_trigger_was_manual` so a
+---subsequent CursorMovedI can revive cached suggestions (e.g. user typed a
+---typo that broke the match, then backspaced to realign). Used by the
+---auto-cleanup path in on_cursor_moved_i; explicit dismiss and insert/buf
+---leave use the default (full clear).
+local function cleanup(ctx, soft)
     ctx = ctx or get_ctx()
     stop_timer()
     bump_request_generation(ctx)
@@ -421,7 +426,9 @@ local function cleanup(ctx)
     ctx.pending_trigger = nil
     ctx.pending_overrides = nil
     ctx.pending_is_manual = nil
-    ctx.last_trigger_was_manual = nil
+    if not soft then
+        ctx.last_trigger_was_manual = nil
+    end
     clear_preview()
 end
 
@@ -688,9 +695,72 @@ action.prev = function(overrides)
     cycle_or_fetch(-1, overrides)
 end
 
--- Insert the first n_chars of the current suggestion. ctx is NOT reset when
--- there is remaining text; on the next CursorMovedI the pool will re-derive the
--- remainder from the updated cursor position and display it as virtual text.
+-- Slide cache entries forward by `accepted` so they remain the canonical match
+-- for the new cursor position. For each entry, keep only completions that begin
+-- with `accepted` (those came from the same suggestion family the user just
+-- partially accepted), strip the accepted prefix off them, extend the entry's
+-- lines_before, and stamp the current changedtick so the typed_since==0 stale
+-- guard in pool_suggestions does not skip the entry on the next CursorMovedI.
+-- This is what keeps the cache priority #1 across long accept-word sessions:
+-- the hard drift limit never trips because the entries follow the cursor.
+local function slide_cache_after_accept(ctx, accepted)
+    if not ctx.cache or #accepted == 0 then
+        return
+    end
+    local changedtick = api.nvim_buf_get_changedtick(0)
+    for _, entry in ipairs(ctx.cache) do
+        local kept = {}
+        for _, comp in ipairs(entry.completions) do
+            if comp:sub(1, #accepted) == accepted then
+                table.insert(kept, comp:sub(#accepted + 1))
+            end
+        end
+        if #kept > 0 then
+            entry.lines_before = entry.lines_before .. accepted
+            entry.completions = kept
+            entry.changedtick = changedtick
+        end
+    end
+end
+
+-- Slice ctx.suggestions forward by `accepted`, preserving the index of the
+-- active suggestion so cycling continues from the same spot. Siblings that
+-- don't start with `accepted` are dropped — they belong to a different family
+-- than the one the user just committed to.
+local function slice_suggestions_after_accept(ctx, accepted)
+    if not ctx.suggestions or #ctx.suggestions == 0 then
+        return
+    end
+    local active_idx = ctx.choice or 1
+    local kept = {}
+    local new_choice
+    for i, s in ipairs(ctx.suggestions) do
+        if s:sub(1, #accepted) == accepted then
+            local rest = s:sub(#accepted + 1)
+            if #rest > 0 then
+                table.insert(kept, rest)
+                if i == active_idx then
+                    new_choice = #kept
+                end
+            end
+        end
+    end
+    if #kept == 0 then
+        reset_ctx(ctx)
+        return
+    end
+    ctx.suggestions = kept
+    ctx.choice = new_choice or 1
+end
+
+-- Insert the first n_chars of the current suggestion. Runs synchronously when
+-- no popup is open so that an auto-repeated keymap can immediately read the
+-- sliced remainder on the next press, instead of seeing the unsliced
+-- suggestion and re-inserting its first word. While the edit is in flight
+-- `ctx.in_accept` is set so the synchronously fired CursorMovedI short-circuits
+-- in on_cursor_moved_i and does not race with the slice. The cache is slid
+-- forward by `to_insert` so future CursorMovedI events keep the same entry as
+-- the canonical match (no flash, no drift expiration).
 local function accept_n_chars(n_chars)
     local ctx = get_ctx()
     local suggestion = get_current_suggestion(ctx)
@@ -701,28 +771,39 @@ local function accept_n_chars(n_chars)
     local to_insert = n_chars and suggestion:sub(1, n_chars) or suggestion
     local has_remaining = n_chars ~= nil and #suggestion > n_chars
 
-    if not has_remaining then
-        reset_ctx(ctx)
-    end
-
-    clear_preview()
-
     local cursor = api.nvim_win_get_cursor(0)
     local line, col = cursor[1] - 1, cursor[2]
+    local lines = vim.split(to_insert, '\n', { plain = true })
 
-    if vim.fn.pumvisible() == 1 then
-        api.nvim_feedkeys(api.nvim_replace_termcodes('<C-e>', true, true, true), 'n', true)
-    end
-
-    vim.schedule(function()
-        local lines = vim.split(to_insert, '\n')
+    local function apply()
+        ctx.in_accept = true
+        clear_preview()
         api.nvim_buf_set_text(0, line, col, line, col, lines)
         local new_col = #lines[#lines]
         if #lines == 1 then
             new_col = new_col + col
         end
         api.nvim_win_set_cursor(0, { line + #lines, new_col })
-    end)
+        slide_cache_after_accept(ctx, to_insert)
+        if has_remaining then
+            slice_suggestions_after_accept(ctx, to_insert)
+            update_preview(ctx)
+        else
+            reset_ctx(ctx)
+        end
+        ctx.in_accept = nil
+    end
+
+    if vim.fn.pumvisible() == 1 then
+        -- Accepting Minuet completion while the pum is open is temporary; when
+        -- the user closes the pum, Vim restores the buffer state and removes
+        -- Minuet's completion text. Close the pum first via feedkeys, then run
+        -- the edit on the next tick so the C-e is processed before our edit.
+        api.nvim_feedkeys(api.nvim_replace_termcodes('<C-e>', true, true, true), 'n', true)
+        vim.schedule(apply)
+    else
+        apply()
+    end
 end
 
 -- Returns the byte length of the next "word unit" in s, matching :h word /
@@ -779,52 +860,21 @@ function action.accept(n_lines, n_words)
         return
     end
 
-    local suggestions = vim.split(suggestion, '\n')
-    local remaining_suggestions = {}
-
     if n_lines then
-        -- NOTE: If the first line is an empty string (""), it indicates that
-        -- the original suggestion began with a newline character. This
-        -- typically occurs during partial completion: when the user accepts
-        -- the first line, the remaining suggestion may start with '\n'. In
-        -- this scenario, we increment n_lines by 1 because the user intends to
-        -- accept the next visible line of text, which corresponds to the
-        -- subsequent element in the suggestions list.
-        if suggestions[1] == '' then
+        local lines = vim.split(suggestion, '\n', { plain = true })
+        -- An empty leading element means the original suggestion began with a
+        -- newline (typical after a partial accept). The user wants the next
+        -- visible line, so bump n_lines past that empty.
+        if lines[1] == '' then
             n_lines = n_lines + 1
         end
-        n_lines = math.min(n_lines, #suggestions)
-        remaining_suggestions = vim.list_slice(suggestions, n_lines + 1, #suggestions)
-        suggestions = vim.list_slice(suggestions, 1, n_lines)
+        n_lines = math.min(n_lines, #lines)
+        local picked = vim.list_slice(lines, 1, n_lines)
+        accept_n_chars(#table.concat(picked, '\n'))
+        return
     end
 
-    if #remaining_suggestions <= 0 then
-        reset_ctx(ctx)
-    end
-
-    clear_preview()
-
-    local cursor = api.nvim_win_get_cursor(0)
-    local line, col = cursor[1] - 1, cursor[2]
-
-    if vim.fn.pumvisible() == 1 then
-        -- Accepting Minuet completion while the pum is open is temporary; when
-        -- the user closes the pum, Vim restores the buffer state and removes
-        -- Minuet's completion text. Therefore we need to close the pum before
-        -- accepting.
-        api.nvim_feedkeys(api.nvim_replace_termcodes('<C-e>', true, true, true), 'n', true)
-    end
-
-    vim.schedule(function()
-        api.nvim_buf_set_text(0, line, col, line, col, suggestions)
-        local new_col = #suggestions[#suggestions]
-        -- For single-line suggestions, adjust the column position by adding the
-        -- current column offset
-        if #suggestions == 1 then
-            new_col = new_col + col
-        end
-        api.nvim_win_set_cursor(0, { line + #suggestions, new_col })
-    end)
+    accept_n_chars(#suggestion)
 end
 
 function action.accept_word()
@@ -963,6 +1013,15 @@ function autocmd.on_cursor_moved_i()
     local bufnr = api.nvim_get_current_buf()
     local ctx = get_ctx(bufnr)
 
+    -- accept_n_chars sets this around its synchronous buffer edit + cursor
+    -- move. The CursorMovedI fired by our own edit must not re-derive from the
+    -- cache: accept_n_chars has already sliced ctx.suggestions and slid the
+    -- cache forward, so running pool_suggestions here would just race with
+    -- that and could repaint with stale state.
+    if ctx.in_accept then
+        return
+    end
+
     -- Only serve cached completions when auto-trigger is on, or when the user
     -- explicitly fired a manual completion that is still "live" (not yet
     -- dismissed by cleanup). This prevents stale ghost-text from appearing
@@ -996,8 +1055,11 @@ function autocmd.on_cursor_moved_i()
     end
 
     -- Cache miss: clear display state if something was shown, then request fresh.
+    -- soft=true preserves ctx.last_trigger_was_manual so a backspace that
+    -- realigns the cursor with a cached prefix can revive the suggestion (the
+    -- typo+backspace recovery path for manual-trigger users).
     if ctx.shown_choices and next(ctx.shown_choices) then
-        cleanup(ctx)
+        cleanup(ctx, true)
     end
     if should_auto_trigger() then
         schedule()
