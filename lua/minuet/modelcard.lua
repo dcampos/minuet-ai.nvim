@@ -131,6 +131,9 @@ M.models = {
     },
     openai_fim_compatible = {
         deepseek = { 'deepseek-chat' },
+        openrouter = {
+            'qwen/qwen3-coder-next',
+        },
         ollama = {
             'qwen2.5-coder:0.5b',
             'qwen2.5-coder:1.5b',

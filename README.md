@@ -40,6 +40,7 @@ Fork of [milanglacier/minuet-ai.nvim](https://github.com/milanglacier/minuet-ai.
     - [Inline completion](#inline-completion)
   - [LLM Provider Examples](#llm-provider-examples)
     - [Openrouter deepseek-v4-flash](#openrouter-deepseek-v4-flash)
+    - [Openrouter qwen3-coder-next (FIM)](#openrouter-qwen3-coder-next-fim)
     - [Opencode Go deepseek-v4-flash](#opencode-go-deepseek-v4-flash)
     - [Deepseek deepseek-v4-flash](#deepseek-deepseek-v4-flash)
     - [Ollama Qwen-2.5-coder:7b](#ollama-qwen-25-coder7b)
@@ -457,6 +458,68 @@ require('minuet').setup {
         },
     },
 }
+```
+
+</details>
+
+### Openrouter qwen3-coder-next (FIM)
+
+<details>
+
+`qwen/qwen3-coder-next` is a strong FIM model, but routing it through OpenRouter
+needs two non-default choices:
+
+1. **Build the raw FIM tokens yourself.** OpenRouter's `/completions` endpoint
+   ignores the OpenAI `suffix` field for FIM, so the usual `prompt` + `suffix`
+   split returns garbage. Assemble Qwen's control tokens directly in the prompt
+   and set `suffix = false`, the same pattern as the llama.cpp example below.
+2. **Pin the provider.** OpenRouter's default routing can land on a backend that
+   mishandles the raw FIM tokens. Pin to providers that serve them correctly.
+
+The token order shown is PSM (prefix, suffix, then the generated middle), which
+matches Qwen3-Coder-Next's official model card. The `stop` list mirrors the
+model card's `eos_token_ids` (note that `<|fim_middle|>` is deliberately not a
+terminator).
+
+```lua
+require('minuet').setup {
+    provider = 'openai_fim_compatible',
+    provider_options = {
+        openai_fim_compatible = {
+            model = 'qwen/qwen3-coder-next',
+            end_point = 'https://openrouter.ai/api/v1/completions',
+            api_key = 'OPENROUTER_API_KEY',
+            name = 'Openrouter',
+            stream = true,
+            optional = {
+                max_tokens = 256,
+                stop = {
+                    '<|fim_prefix|>', '<|fim_suffix|>', '<|fim_pad|>',
+                    '<|repo_name|>', '<|file_sep|>', '<|endoftext|>', '<|im_end|>',
+                },
+                -- Pin providers that serve raw FIM correctly.
+                provider = { order = { 'parasail/bf16', 'atlas-cloud/fp8' }, allow_fallbacks = false },
+            },
+            template = {
+                prompt = function(prefix, suffix, _)
+                    return '<|fim_prefix|>' .. prefix .. '<|fim_suffix|>' .. suffix .. '<|fim_middle|>'
+                end,
+                suffix = false,
+            },
+        },
+    },
+}
+```
+
+To experiment with SPM ordering (suffix first, prefix last), which keeps the
+prefix at the very end of the prompt so typing only appends and the server-side
+KV cache stays warm across keystrokes (see `virtualtext.context_growth_slack`),
+swap the `prompt` builder for:
+
+```lua
+prompt = function(prefix, suffix, _)
+    return '<|fim_prefix|>' .. '<|fim_suffix|>' .. suffix .. '<|fim_middle|>' .. prefix
+end,
 ```
 
 </details>
