@@ -215,7 +215,7 @@ local function minuet_complete(arglead, cmdline, _)
     local completions = {
         cmp = { enable = true, disable = true, toggle = true },
         blink = { enable = true, disable = true, toggle = true },
-        duet = { predict = true, apply = true, dismiss = true, cycle = true, toggle = true },
+        duet = { predict = true, apply = true, dismiss = true, cycle = true, toggle = true, inspect = true },
         virtualtext = {
             enable = true,
             disable = true,

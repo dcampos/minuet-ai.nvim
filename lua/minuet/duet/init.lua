@@ -17,6 +17,30 @@ local internal = {
     debounce = {}, -- bufnr -> uv_timer
 }
 
+-- Transcript of the most recent prediction (inputs / model turns / outcome),
+-- surfaced by `:Minuet duet inspect`. Set in predict(), filled in run_loop().
+M.last = nil
+
+local function record_turn(ctx, turn)
+    if ctx.last then
+        table.insert(ctx.last.turns, turn)
+    end
+end
+
+local function set_outcome(ctx, outcome)
+    if ctx.last then
+        ctx.last.outcome = outcome
+    end
+end
+
+--- Pull reasoning + assistant text off a response message (both optional).
+---@return string? reasoning, string? content
+local function msg_meta(message)
+    local reasoning = (type(message.reasoning) == 'string' and message.reasoning ~= '') and message.reasoning or nil
+    local content = (type(message.content) == 'string' and message.content ~= '') and message.content or nil
+    return reasoning, content
+end
+
 local function scfg()
     return require('minuet').config.duet.session
 end
@@ -104,6 +128,7 @@ function run_loop(ctx)
     local s = scfg()
     if ctx.attempts >= (s.max_attempts or 3) then
         utils.notify('Minuet duet: no valid patch after ' .. ctx.attempts .. ' attempts.', 'warn', vim.log.levels.WARN)
+        set_outcome(ctx, 'no valid patch after ' .. ctx.attempts .. ' attempts')
         ctx.state.pending_seq = nil
         return
     end
@@ -116,12 +141,14 @@ function run_loop(ctx)
 
             if result.error then
                 utils.notify('Minuet duet request failed: ' .. result.error, 'warn', vim.log.levels.WARN)
+                set_outcome(ctx, 'request failed: ' .. tostring(result.error))
                 ctx.state.pending_seq = nil
                 return
             end
 
             local message = result.message
             local call = message.tool_calls and message.tool_calls[1]
+            local reasoning, msg_content = msg_meta(message)
 
             -- Tool call path -------------------------------------------------
             if call and call['function'] then
@@ -135,24 +162,38 @@ function run_loop(ctx)
                         -- otherwise a model that keeps calling `read` loops unbounded
                         -- (reads do not spend an attempt).
                         utils.notify('Minuet duet: read limit reached; no patch produced.', 'verbose', vim.log.levels.INFO)
+                        record_turn(ctx, { kind = 'read', reasoning = reasoning, args = args, refused = true })
+                        set_outcome(ctx, 'read limit reached')
                         ctx.state.pending_seq = nil
                         return
                     end
                     local content = tools.read_result(ctx.bufnr, args)
+                    record_turn(ctx, { kind = 'read', reasoning = reasoning, args = args, result = content })
                     table.insert(ctx.messages, assistant_echo(message))
                     table.insert(ctx.messages, { role = 'tool', tool_call_id = call.id, content = content })
                     ctx.reads = ctx.reads + 1
                     run_loop(ctx) -- read does not spend an attempt
                     return
                 elseif name == 'apply_patch' then
+                    local patch = args.input or ''
                     if utils.get_changedtick(ctx.bufnr) ~= ctx.changedtick then
                         utils.notify('Minuet duet: buffer changed; discarded.', 'verbose', vim.log.levels.INFO)
+                        record_turn(ctx, { kind = 'apply_patch', reasoning = reasoning, content = msg_content, patch = patch })
+                        set_outcome(ctx, 'buffer changed; discarded')
                         ctx.state.pending_seq = nil
                         return
                     end
-                    local patch = args.input or ''
                     local applied, new_lines, err = apply_patch.apply(ctx.buf_lines, patch)
+                    record_turn(ctx, {
+                        kind = 'apply_patch',
+                        reasoning = reasoning,
+                        content = msg_content,
+                        patch = patch,
+                        applied = applied,
+                        error = err,
+                    })
                     if applied then
+                        set_outcome(ctx, 'preview shown')
                         ctx.state.pending_seq = nil
                         show_preview(ctx.bufnr, ctx.state, ctx.buf_lines, new_lines, ctx.changedtick, patch)
                         return
@@ -175,7 +216,9 @@ function run_loop(ctx)
             local content = type(message.content) == 'string' and message.content or ''
             if content:find '%*%*%* Begin Patch' then
                 local applied, new_lines, err = apply_patch.apply(ctx.buf_lines, content)
+                record_turn(ctx, { kind = 'content_patch', reasoning = reasoning, content = content, patch = content, applied = applied, error = err })
                 if applied then
+                    set_outcome(ctx, 'preview shown')
                     ctx.state.pending_seq = nil
                     show_preview(ctx.bufnr, ctx.state, ctx.buf_lines, new_lines, ctx.changedtick, content)
                 else
@@ -188,6 +231,8 @@ function run_loop(ctx)
             end
 
             if content:find(vim.pesc(s.no_edit_token)) then
+                record_turn(ctx, { kind = 'no_edit', reasoning = reasoning, content = content })
+                set_outcome(ctx, 'no edit suggested')
                 ctx.state.pending_seq = nil
                 if ctx.mode ~= 'auto' then
                     utils.notify('Minuet duet: no edit suggested.', 'verbose', vim.log.levels.INFO)
@@ -195,6 +240,8 @@ function run_loop(ctx)
                 return
             end
 
+            record_turn(ctx, { kind = 'other', reasoning = reasoning, content = content })
+            set_outcome(ctx, 'no usable edit')
             ctx.state.pending_seq = nil
             if ctx.mode ~= 'auto' then
                 utils.notify('Minuet duet: model returned no usable edit.', 'verbose', vim.log.levels.INFO)
@@ -226,16 +273,32 @@ local function predict(mode, opts)
         utils.notify('Minuet duet predicting...', 'verbose', vim.log.levels.INFO)
     end
 
+    local messages = build_messages(bufnr, opts.reject_patch)
+    local duet = require('minuet').config.duet
+    local popts = duet.provider_options[duet.provider] or {}
+    M.last = {
+        time = os.date '%H:%M:%S',
+        path = vim.fn.fnamemodify(api.nvim_buf_get_name(bufnr), ':.'),
+        mode = mode,
+        model = popts.model,
+        effort = popts.optional and popts.optional.reasoning and popts.optional.reasoning.effort or nil,
+        system = messages[1].content,
+        user = messages[2].content,
+        turns = {},
+        outcome = 'pending',
+    }
+
     run_loop {
         bufnr = bufnr,
         state = state,
         seq = seq,
         changedtick = utils.get_changedtick(bufnr),
         buf_lines = buf_lines(bufnr),
-        messages = build_messages(bufnr, opts.reject_patch),
+        messages = messages,
         mode = mode,
         attempts = 0,
         reads = 0,
+        last = M.last,
     }
 end
 
@@ -340,6 +403,11 @@ local action = {
     dismiss = dismiss,
     cycle = cycle,
     toggle = toggle,
+    -- Toggle the introspection float showing the last prediction's inputs,
+    -- model reasoning, patch and outcome.
+    inspect = function()
+        require('minuet.duet.inspect').toggle(M.last)
+    end,
     is_visible = function()
         local bufnr = api.nvim_get_current_buf()
         return preview.is_visible(bufnr, get_state(bufnr))
