@@ -10,7 +10,7 @@ local chat = require 'minuet.duet.chat'
 local tools = require 'minuet.duet.tools'
 local apply_patch = require 'minuet.duet.apply_patch'
 local root = require('minuet').config
-root.duet.provider_options.openai_compatible.optional.reasoning.effort = 'medium'
+root.duet.provider_options.openai_compatible.optional.reasoning.effort = os.getenv 'MINUET_EFFORT' or 'medium'
 local N = tonumber(os.getenv 'BENCH_N') or 6
 local SYS = root.duet.session.system .. '\n\n' .. root.duet.session.capability_reminder
 
