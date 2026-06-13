@@ -479,6 +479,19 @@ function M.setup()
         desc = '[minuet.duet] capture edit history + invalidate preview',
     })
 
+    api.nvim_create_autocmd('InsertEnter', {
+        group = M.augroup,
+        callback = function(info)
+            -- NES is normal-mode; a preview should not linger once the user types.
+            local state = internal.states[info.buf]
+            if state then
+                settle('ignored', false)
+                clear_state(info.buf, state)
+            end
+        end,
+        desc = '[minuet.duet] dismiss preview on entering insert mode',
+    })
+
     api.nvim_create_autocmd({ 'BufReadPost', 'BufNewFile' }, {
         group = M.augroup,
         callback = function(info)
