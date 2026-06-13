@@ -405,6 +405,11 @@ local function toggle()
         enabled = scfg().auto_trigger
     end
     M.auto_enabled = not enabled
+    if not M.auto_enabled then
+        -- Turning auto off also clears a suggestion already on screen (and cancels
+        -- any in-flight prediction via clear_state), like virtualtext's disable.
+        dismiss()
+    end
     -- User-initiated status: notify directly (always shown), matching the
     -- virtualtext/cmp toggle convention rather than the gated utils.notify.
     vim.notify('Minuet duet auto-trigger ' .. (M.auto_enabled and 'enabled' or 'disabled'), vim.log.levels.INFO)
