@@ -1,65 +1,83 @@
-# Duet NES — apply_patch spec (v1)
+# Duet NES — apply_patch spec (v1, tuned; v2 direction noted)
 
-NES for `Minuet duet`. One model (`gpt-oss-120b` via OpenRouter), **no separate
-apply model**. **Normal mode only, single buffer.** Treated as a long-lived
-**code session** (KV-cache aware): the model sees the running stream of user
-edits, the file state, its own past proposals + reasoning, and user results. It
-emits one small Codex-style `apply_patch` (or calls `read`); we **validate by
-applying before preview**. Rationale: `duet-nes-research.md`.
+NES for `Minuet duet`. One model (`gpt-oss-120b` via OpenRouter, Cerebras/Groq),
+**no separate apply model**. **Normal mode only, single buffer.** Each prediction
+the model sees the recent user edits (apply_patch dialect), the current file, and
+the **cursor as a separate note** (kept out of the file/patch text); it emits one
+small Codex-style `apply_patch` (or calls `read`); we **validate by applying
+before preview**. Rationale: `duet-nes-research.md`.
+
+> Status: v1 shipped and then tuned on branch `duet-nes` (decisive prompt,
+> cursor-as-note, `effort=low` re-validated, Cerebras/Groq pin, post-accept
+> burst, `:Minuet duet inspect` introspection). The “bigger edits per request”
+> idea is aspirational — see **Direction (v2)**. `make test` = 69 green.
 
 ## UX (mirrors minuet completion, but normal mode)
 
-- **Toggle** auto, **manual trigger**, **cycle**, **accept**, **dismiss** —
-  `<C-…>` normal-mode maps (placeholders; user rebinds). e.g. `<C-f>` trigger,
-  `<C-n>` cycle, `<C-o>` accept, `<C-a>` dismiss, `<C-e>` toggle.
-- **One suggestion at a time.** Cycle = regenerate **on the fly** (no prefetch pool).
-- **Manual**: accumulated edits are flushed **one-by-one into a single request**,
-  then a prediction is asked. **Auto**: each edit is appended **as it happens**
-  (and may trigger).
+- Commands: `:Minuet duet {predict, apply, dismiss, cycle, toggle, inspect}`.
+  Normal-mode maps are the **user's** (the dev config uses `<Tab>` = accept the
+  shown suggestion else predict, `<S-Tab>` = toggle duet + virtualtext
+  auto-trigger together, `<leader>M` = toggle the inspect float).
+- **One suggestion at a time.** Cycle = regenerate **on the fly** (no prefetch
+  pool). *(v1; revisited in “Direction (v2)” below — batch the model, queue locally.)*
+- Edits are captured (uncoalesced) by autocmd. **Manual trigger** (`predict`) is
+  immediate (no debounce). **Auto-trigger** fires on `TextChanged`/`InsertLeave`
+  after `debounce_ms` (150). After an **accept**, when auto is on, the next
+  prediction is fired **immediately** (no debounce) so bursts feel instant.
 - **Auto only**: model may decline via the **no-edit token** (`*** No Edit`).
+- **Inspect**: `:Minuet duet inspect` toggles a floating window with the session
+  history (newest first): per prediction the model **reasoning**, emitted
+  **patch**, `read()` calls, **outcome**, and **result**
+  (accepted / dismissed / rejected-cycled / ignored). Full inputs shown for the
+  latest only.
 
-## Session layout (KV-cache aware, append-only between resets)
+## Message assembly (as built)
 
-Stable cached **prefix** (built at session start / reset):
+Each predict sends two messages (the user turn is **rebuilt from session state**
+per predict; the append-only KV-cached log below is still aspirational):
+
 ```
-1 general instructions     (system)
-2 examples                 (few-shots)
-3 caveats                  (partial apply_patch tool; single small edit; no-op token)
-4 other helpful details    (filename, filetype, indent, "this is NES")
-5 seed prev edits          (on reset: last `reset_seed_edits`; first start: none)
-6 full file state          (ENTIRE buffer at start/reset)
-```
-Then the appended **running log**, per round:
-```
-7  prev edits              (since last prediction; apply_patch-with-context, UNcoalesced)
-8  file state after edits  (affected region; full buffer only at start/reset)
-9  model response          (apply_patch patch + reasoning, OR read() call, OR no-op)
-10 user result             (accepted / ignored / rejected-cycled / dismissed)
-   … repeat 7–10 …
+system : decisive NES system prompt  +  capability reminder
+user   : 1 cursor note    ("Editor cursor: line L, column C; that line reads `…`")
+         2 recent edits   ("Recent edits (oldest to newest):" + apply_patch blocks)
+         3 current file   ("Current file `path`:" + ENTIRE buffer, clean)
+         (cycle only) + "already proposed and rejected; propose a DIFFERENT edit"
 ```
 
-- **Edit history = the prev-edit turns**, no separate block. **Local
-  change-tracking structure** (autocmd-driven; **no undotree**).
-- **Not unified diffs** — each edit is an `apply_patch`-dialect `*** Update File`
-  hunk **with expanded context** (`history_context_lines`, default 8). The
-  explicit "file state after edits" snapshot additionally anchors ground truth.
-- **Rolling reset** → fresh session when **edits ≥ `session_max_edits`
-  (default 20)** or **idle ≥ `idle_reset_minutes` (20)**. The new session
-  re-seeds the full buffer + last `reset_seed_edits` edits.
-- **Capability reminder** every `capability_reminder_every` edits: only
-  **Update File, one small hunk; no Add/Delete/Move**.
+- **Cursor is a separate note**, never an inline marker — an inline `<|cursor|>`
+  is out-of-distribution for an apply_patch-trained model (it got copied into
+  patches and biased reverts). The file/patch text stays clean.
+- **Edit history**: a **local change-tracking structure** (autocmd-driven, **no
+  undotree**) captures edits **uncoalesced**; each is rendered as an
+  `apply_patch`-dialect `*** Update File` hunk with expanded context
+  (`history_context_lines`, default 8).
+- **Rolling reset** → fresh session when **edits ≥ `max_edits` (20)** or **idle ≥
+  `idle_minutes` (20)**; the new session re-seeds the last `seed_edits` (3).
+- **Capability reminder** is currently appended to **every** system prompt (the
+  `capability_reminder_every` cadence knob is defined but unused).
+
+Aspirational (not yet built): the **KV-cache-aware append-only log** — stable
+prefix (instructions, few-shots, full file at reset) + per-round appended turns
+(prev edits, model response + reasoning, user result), so the prefix stays
+cached. Today the system prompt is stable but the user turn is rebuilt each time;
+the per-prediction transcript that `inspect` shows is kept separately.
 
 ## Tools
 
 - **`apply_patch`** — Codex format, **Update File only**, **exact (non-fuzzy)
   context match**.
-- **`read(range?)`** — returns current buffer content (single buffer). On apply
-  failure the model is instructed to `read` then retry (Codex re-anchor).
+- **`read(range?)`** — returns current buffer content (single buffer). The prompt
+  tells the model it **already has the full current file**, so emit directly and
+  only `read` to re-check exact text **if a patch it tried this turn failed**
+  (Codex re-anchor). Reads are capped (`max_reads`, 2) and **enforced** (hitting
+  the cap stops the loop rather than re-requesting forever).
 
 ## Output
 
 One **minimal** apply_patch edit — on a multi-site rename emit only the **next**
-occurrence, not all. Or `read(...)`. Or `*** No Edit` (auto).
+occurrence, not all. Be **decisive** (act on a single recent edit if it looks
+repeatable); **never revert** a recent edit or emit a **no-op**; never put the
+cursor note inside a patch. Or `read(...)`. Or `*** No Edit` (auto).
 ```
 *** Begin Patch
 *** Update File: <relpath>
@@ -74,60 +92,121 @@ occurrence, not all. Or `read(...)`. Or `*** No Edit` (auto).
 
 ```
 predict(mode):
-  flush pending edits   (manual: batch one-by-one in this single request; auto: already live)
-  append predict turn (+ periodic capability reminder)
-  for attempt = 1..MAX_ATTEMPTS (=3):              -- read() replies don't spend an attempt (cap max_reads=2)
+  build messages (cursor note + recent edits + current file; cycle adds a reject nudge)
+  for attempt = 1..max_attempts (=3):              -- read() replies don't spend an attempt
     resp = model(session)
-    if resp is read(range): append tool-result(buffer); continue
-    if mode==auto and resp == NO_EDIT: record; return
+    if resp is read(range):
+      if reads >= max_reads (=2): stop            -- enforced; no unbounded read loop
+      append tool-result(buffer); continue
+    if resp == NO_EDIT: record; return
     ok, new_lines, err = apply_patch(buf_lines, resp)          -- exact, in-memory
-    if ok: append assistant(resp+reasoning); preview(buf -> new_lines); return
-    append assistant(resp) + user("apply_patch failed: " .. err .. "; you may read() then retry")
+    if ok: preview(buf -> new_lines); record turn; return
+    append assistant(resp) + tool("apply_patch failed: " .. err .. "; read() then retry")
   notify("duet: no valid patch in N attempts")
 
-cycle():  append user("rejected; give a different next edit") → rerun loop on the fly
-accept(): nvim_buf_set_lines(new_lines) + changedtick guard; append user("accepted")
-dismiss(): append user("dismissed / ignored")
+cycle():   mark current result=rejected; rerun predict with "give a DIFFERENT edit"
+accept():  changedtick guard; nvim_buf_set_lines(new_lines); rebase baseline;
+           move cursor to the first changed line; if auto → predict('auto') NOW
+           (burst — nvim_buf_set_lines does not fire TextChanged, so fire explicitly)
+dismiss(): clear preview; mark result=dismissed
 ```
 
-- Only a cleanly-applied patch is ever previewed. Accept never re-runs the model.
+- Only a cleanly-applied patch is ever previewed.
+- **Accept re-runs the model** only as the burst (auto on); the accepted edit
+  itself is applied locally without a model call.
+- Each predict appends a record to the session transcript (`M.history`, capped),
+  and `accept/dismiss/cycle`/supersession set that record's **result**.
 
 ## Components
 
-- `duet/session.lua` — local change-tracking + running message list; prefix build
-  (full buffer); manual-batch vs auto-live flush; proposals + reasoning; user
-  results; capability reminders; rolling reset with seed edits.
+- `duet/session.lua` — local change-tracking; `render_edit` (apply_patch-with-
+  context, reuses `vim.diff`); `build_user_turn` (cursor note + edits + file);
+  rolling reset with seed edits.
 - `duet/apply_patch.lua` — parse + apply Codex patch (exact) → `ok, new_lines, err`.
-- `duet/tools.lua` — `read` handler + `apply_patch` dispatch.
-- `duet/init.lua` — predict / cycle / accept / dismiss + loop; normal-mode maps;
-  auto-trigger autocmd + toggle.
-- `duet/config.lua` — prompts, few-shots, knobs.
+- `duet/tools.lua` — `read` handler + `apply_patch`/`read` schemas.
+- `duet/chat.lua` — non-streaming tool-calling request (curl → JSON → message).
+- `duet/init.lua` — predict / cycle / accept / dismiss + loop; edit-capture
+  autocmd + auto-trigger toggle + post-accept burst; per-prediction transcript
+  (`M.last` / `M.history`).
+- `duet/inspect.lua` — the introspection float (session history render + toggle).
+- `duet/config.lua` — prompt + knobs (provider, effort, session).
 
 ## Config (defaults)
 
 ```
-provider = openai_compatible → openai/gpt-oss-120b, OpenRouter,
-           reasoning.effort = low, route {cerebras, groq}
-auto_trigger              = false
-session_max_edits         = 20      -- rolling reset
-idle_reset_minutes        = 20
-reset_seed_edits          = 3       -- prev edits carried into a fresh session
-history_context_lines     = 8       -- context per past edit
-capability_reminder_every = 5
-max_attempts              = 3
-max_reads                 = 2
-no_edit_token             = "*** No Edit"
+provider           = openai_compatible → openai/gpt-oss-120b, OpenRouter
+request_timeout    = 15
+optional           = reasoning.effort = 'low'
+                     provider = { order = { 'cerebras', 'groq' }, allow_fallbacks = false }
+session = {
+  history_context_lines     = 8     -- context per past edit
+  max_edits                 = 20    -- rolling reset cap
+  idle_minutes              = 20    -- rolling reset idle
+  seed_edits                = 3     -- prev edits carried into a fresh session
+  capability_reminder_every = 5     -- (defined; not yet used — reminder is every turn)
+  max_attempts              = 3
+  max_reads                 = 2     -- enforced
+  auto_trigger              = false
+  debounce_ms               = 150   -- auto-trigger only; manual + post-accept burst = no wait
+  no_edit_token             = '*** No Edit'
+}
 ```
+
+`effort = 'low'` was re-validated against the decisive prompt (the earlier reverts
+were the old vague prompt + inline cursor marker): at low, first-turn rename
+k=1/k=2 and a local finish-at-cursor edit were all 10/10 forward, 0 reads, 0 bad
+patches.
 
 ## Out of scope (v1)
 
 Multi-buffer, Add/Delete/Move-File hunks, streaming preview, undotree integration.
 
+## Direction (v2 hypothesis): bigger model edits, granular user approval
+
+Latency is dominated by the per-request round trip (~0.4–0.5 s on Cerebras). v1
+does **one small edit per request**, so an N-site change costs N round trips even
+with the post-accept burst (accept → immediately re-request). Suspected better
+direction: **decouple how much the model does per request from how finely the
+user approves.**
+
+- **Model: more per request.** Ask for the next *K* edits in one call (several
+  ordered `*** Update File` hunks, or a short plan + hunks), not just the single
+  next occurrence.
+- **User: still small.** Keep cycle / accept / dismiss at one-small-edit
+  granularity, but serve them from a **local queue** of the buffered hunks — no
+  new request per accept. Re-request only when the queue drains or the user
+  diverges.
+- **Net:** amortize the round trip across several edits → snappier bursts, with
+  user control unchanged. This reverses the v1 “one suggestion at a time, no
+  prefetch pool” decision (UX §).
+
+Tensions to resolve:
+- **Staleness.** Later hunks may not apply after earlier accepts. Re-validate
+  each queued hunk against the *current* buffer right before preview; drop or
+  re-anchor (or refetch) any that no longer match exactly. Only a cleanly-applying
+  hunk is ever previewed (v1 invariant holds per-hunk).
+- **Divergence.** If the user makes an edit that is not the next queued hunk, the
+  batch was predicated on a plan that no longer holds → invalidate the queue and
+  refetch.
+- **Preview granularity.** Still preview only the next hunk; accept advances the
+  queue and moves the cursor to the next hunk’s site.
+- **cycle semantics.** cycle = skip this site (preview the next queued hunk) vs a
+  separate “reject all / regenerate” for a fresh batch.
+- **Does the model batch well?** Current prompt asks for exactly one hunk; v2
+  needs “emit the next K edits as separate, ordered Update File hunks”. Bench
+  before committing: multi-hunk apply-success, and the **staleness rate** (how
+  many queued hunks still apply after sequential accepts).
+
+Open: K (a small fixed cap, e.g. 3–5, vs “as many as clearly follow the same
+pattern”); whether to stream hunks for first-paint latency; how this interacts
+with the introspection log (one record per batch, with per-hunk results).
+
 ## Validated tool schema (live gpt-oss-120b probe, 2026-06-12)
 
-Confirmed against `openai/gpt-oss-120b` on OpenRouter (`reasoning.effort=low`,
-`provider.sort=throughput`): the model **calls `apply_patch` natively** and
-returns a clean minimal Update-File patch. ~1.1 s round trip. Request shape:
+Confirmed against `openai/gpt-oss-120b` on OpenRouter: the model **calls
+`apply_patch` natively** and returns a clean minimal Update-File patch. With the
+Cerebras/Groq pin a cold round trip is ~0.49 s (served by Cerebras). Request
+shape:
 
 ```
 tools = [
@@ -136,7 +215,8 @@ tools = [
   { type=function, function={ name="read",
       parameters={ type=object, properties={ start_line=int, end_line=int } } } },
 ]
-tool_choice="auto", reasoning={effort="low"}, provider={sort="throughput"}
+tool_choice="auto", reasoning={effort="low"},
+provider={order=["cerebras","groq"], allow_fallbacks=false}
 ```
 
 Response: `choices[1].message.tool_calls[1].function` = `{name="apply_patch",
@@ -170,7 +250,16 @@ Dev: `~/code/lua/minuet-ai.nvim` branch `duet-nes`. Tests: `make test` (headless
       history, `:Minuet duet predict` → preview → apply propagated the rename to
       the usage site. `tests/harness/e2e_duet.sh`.
 
-**Status: v1 working end-to-end. `make test` = 69 green.** Follow-ups (not v1):
-append-only session log with model turns for KV-cache reuse (currently the user
-turn is rebuilt per predict from session state); few-shots; capability-reminder
-cadence; streaming. Run `make format` (stylua) before pushing.
+- [x] **Tuning** (benched against live gpt-oss-120b, see `experiments/duet-nes/`):
+      decisive prompt; cursor as a separate note (not inline marker); `effort=low`
+      re-validated; Cerebras/Groq pin; `max_reads` enforced.
+- [x] **Post-accept burst** — accept chains the next prediction immediately
+      (auto on), since `nvim_buf_set_lines` does not fire `TextChanged`.
+- [x] **Introspection** — `:Minuet duet inspect` float over `M.history`
+      (reasoning / patch / outcome / per-prediction result).
+
+**Status: working end-to-end and tuned. `make test` = 69 green.** Follow-ups:
+the append-only KV-cached session log (today the user turn is rebuilt per
+predict); few-shots; capability-reminder cadence; streaming; and the
+**Direction (v2)** batch-the-model experiment. Run `make format` (stylua) before
+merging to `main`.
