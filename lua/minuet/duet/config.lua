@@ -169,17 +169,51 @@ end
 
 local function make_openai_compatible_options()
     return {
-        model = 'deepseek/deepseek-v4-flash',
+        model = 'openai/gpt-oss-120b',
         api_key = 'OPENROUTER_API_KEY',
         end_point = 'https://openrouter.ai/api/v1/chat/completions',
         name = 'Openrouter',
         system = vim.deepcopy(default_system),
         few_shots = default_few_shots,
         chat_input = vim.deepcopy(default_chat_input),
-        optional = {},
+        optional = {
+            -- NES wants low latency and minimal reasoning.
+            reasoning = { effort = 'low' },
+            provider = { sort = 'throughput' },
+        },
         transform = {},
     }
 end
+
+-- NES (apply_patch) session prompt. The model receives the user's recent edits
+-- (apply_patch dialect) and the current file with a cursor marker, and predicts
+-- the single next edit via the apply_patch tool.
+local function make_nes_system(cursor_marker, no_edit_token)
+    return ([[You are a next-edit-prediction engine inside the user's code editor.
+
+You are given the user's recent edits (in apply_patch dialect, oldest to newest)
+and the current file with a %s marker showing the cursor position. Predict the
+SINGLE smallest next edit the user is most likely to make, and emit it by calling
+the `apply_patch` tool.
+
+Rules:
+- Emit exactly ONE small edit. On a multi-site change such as a rename, emit only
+  the NEXT occurrence, not all of them.
+- You only have the `*** Update File` capability of apply_patch: a single small
+  hunk. No `*** Add File`, `*** Delete File`, or `*** Move to`.
+- The patch must apply to the CURRENT file: context and removed (`-`) lines must
+  match the real buffer exactly. If unsure of the exact text, call `read` first,
+  then emit the patch.
+- The %s marker is not real text; never include it in a patch.
+- If no edit is warranted, reply with the text `%s` and do not call a tool.]]):format(
+        cursor_marker,
+        cursor_marker,
+        no_edit_token
+    )
+end
+
+local DUET_CURSOR_MARKER = '<|cursor|>'
+local DUET_NO_EDIT_TOKEN = '*** No Edit'
 
 ---@alias minuet.DuetChatInputFunction fun(context: table): string
 
@@ -210,7 +244,8 @@ end
 ---@field preview { cursor: string }
 ---@field provider_options table<string, table>
 local M = {
-    provider = 'gemini',
+    -- NES (apply_patch) is the active duet design; default to gpt-oss via OpenRouter.
+    provider = 'openai_compatible',
     request_timeout = 15,
     editable_region = {
         lines_before = 8,
@@ -225,6 +260,23 @@ local M = {
     markers = vim.deepcopy(default_markers),
     preview = {
         cursor = '\u{f246}',
+    },
+    -- NES session settings (apply_patch flow). See duet-nes-spec.md.
+    session = {
+        cursor_marker = DUET_CURSOR_MARKER,
+        no_edit_token = DUET_NO_EDIT_TOKEN,
+        system = make_nes_system(DUET_CURSOR_MARKER, DUET_NO_EDIT_TOKEN),
+        capability_reminder = 'Reminder: emit exactly one small `*** Update File` hunk via the apply_patch '
+            .. 'tool; no Add/Delete/Move; context and `-` lines must match the current buffer exactly.',
+        history_context_lines = 8,
+        max_edits = 20,
+        idle_minutes = 20,
+        seed_edits = 3,
+        capability_reminder_every = 5,
+        max_attempts = 3,
+        max_reads = 2,
+        auto_trigger = false,
+        debounce_ms = 150,
     },
     provider_options = {
         openai = make_openai_options(),

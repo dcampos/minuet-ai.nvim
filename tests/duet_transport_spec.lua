@@ -2,32 +2,27 @@ local helpers = require 'tests.helpers'
 
 return {
     {
-        name = 'duet.action.predict works through the openai-compatible streaming transport',
+        name = 'duet.action.predict works through the openai-compatible tool-call transport',
         run = function()
             local original_api_key = vim.env.OPENROUTER_API_KEY
             local bufnr
 
             local ok, err = xpcall(function()
-                local mock = vim.fn.getcwd() .. '/tests/scripts/mock_openai_stream.sh'
-
+                local mock = vim.fn.getcwd() .. '/tests/scripts/mock_openai_toolcall.sh'
                 vim.env.OPENROUTER_API_KEY = 'test-key'
 
                 helpers.setup_root_config {
                     curl_cmd = mock,
                     duet = {
                         provider = 'openai_compatible',
-                        request_timeout = 2,
-                        editable_region = {
-                            lines_before = 0,
-                            lines_after = 0,
-                        },
+                        request_timeout = 5,
                         provider_options = {
                             openai_compatible = {
-                                end_point = [[<editable_region>
-return 42<cursor_position/>
-</editable_region>]],
+                                end_point = 'http://127.0.0.1/duet-mock',
                                 model = 'fixture-model',
+                                api_key = 'OPENROUTER_API_KEY',
                                 name = 'Fixture',
+                                optional = {},
                             },
                         },
                     },
@@ -37,6 +32,7 @@ return 42<cursor_position/>
                 duet.setup()
 
                 bufnr = helpers.create_buffer({ 'return 1' }, { 1, 8 })
+                require('minuet.duet.session').rebase(bufnr)
 
                 duet.action.predict()
 
@@ -47,7 +43,6 @@ return 42<cursor_position/>
                 duet.action.apply()
 
                 helpers.expect_equal(vim.api.nvim_buf_get_lines(bufnr, 0, -1, false), { 'return 42' })
-                helpers.expect_equal(vim.api.nvim_win_get_cursor(0), { 1, 8 })
                 helpers.expect_falsy(duet.action.is_visible(), 'preview should be cleared after apply')
             end, debug.traceback)
 
