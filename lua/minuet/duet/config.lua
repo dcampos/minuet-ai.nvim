@@ -212,9 +212,13 @@ The next edit is usually one of:
 Rules:
 - Emit exactly ONE small `*** Update File` hunk. No `*** Add File`, `*** Delete
   File`, or `*** Move to`.
+- Be decisive: even a SINGLE recent edit can be the start of a repeated change.
+  If it looks repeatable and other matching sites remain, propose the next one
+  now rather than waiting for more examples.
 - The patch must apply to the CURRENT file: context and removed (`-`) lines must
-  match the buffer EXACTLY. If you are unsure of the exact text, call `read` first,
-  then emit the patch.
+  match the buffer EXACTLY. You already have the full current file above, so emit
+  the patch directly; only call `read` to re-check the exact text if a patch you
+  tried this turn failed to apply.
 - The cursor position is given to you separately as a note; never put a cursor
   marker or annotation inside a patch.
 - Never revert or undo a recent edit, and never emit a no-op patch.
