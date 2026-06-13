@@ -177,11 +177,11 @@ local function make_openai_compatible_options()
         few_shots = default_few_shots,
         chat_input = vim.deepcopy(default_chat_input),
         optional = {
-            -- `effort = 'low'` makes gpt-oss-120b misread the edit pattern and
-            -- propose reverts / cursor-marker no-ops on NES; 'medium' fixes that
-            -- (next-edit propagation across lines) for an acceptable latency cost.
-            reasoning = { effort = 'medium' },
-            provider = { sort = 'throughput' },
+            -- NES wants the lowest round-trip latency. `effort = 'low'` (the older,
+            -- vaguer prompt made it revert at low; the current decisive prompt holds
+            -- up). Pin Cerebras then Groq and disallow other (slower) providers.
+            reasoning = { effort = 'low' },
+            provider = { order = { 'cerebras', 'groq' }, allow_fallbacks = false },
         },
         transform = {},
     }
