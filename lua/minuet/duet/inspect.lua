@@ -1,6 +1,9 @@
--- Floating-window introspection for the last `Minuet duet` prediction: the exact
--- inputs we sent (system prompt + user turn), each model turn (reasoning, patch,
--- read calls) and the final outcome. Toggled via `:Minuet duet inspect`.
+-- Floating-window introspection for the `Minuet duet` session: for each
+-- prediction, what the model inferred (reasoning), the patch it proposed, any
+-- read() calls, the outcome, and the user's result (accepted / ignored /
+-- dismissed / rejected). Newest first; the full inputs (system prompt + user
+-- turn) are shown for the most recent prediction only. Toggled via
+-- `:Minuet duet inspect`.
 
 local api = vim.api
 local M = {}
@@ -31,93 +34,110 @@ local function fmt_args(args)
     return '{' .. table.concat(parts, ', ') .. '}'
 end
 
----@param last table
----@return string[]
-local function render(last)
-    local L = {}
+---@param L string[]
+---@param rec table
+local function render_turns(L, rec)
     local function add(s)
         table.insert(L, s)
     end
     local function block(text)
         for _, line in ipairs(vim.split(text or '', '\n', { plain = true })) do
-            add(line)
+            add('    ' .. line)
         end
     end
 
-    add('# Minuet duet · last prediction')
-    add('')
-    add(('- time `%s`   buffer `%s`   mode `%s`'):format(last.time or '?', last.path or '?', last.mode or '?'))
-    add(('- model `%s`   effort `%s`'):format(tostring(last.model), tostring(last.effort)))
-    add(('- outcome **%s**'):format(tostring(last.outcome)))
-
-    add('')
-    add('## System prompt')
-    add('')
-    block(last.system)
-
-    add('')
-    add('## Inputs (user turn)')
-    add('')
-    block(last.user)
-
-    add('')
-    add(('## Model turns (%d)'):format(#(last.turns or {})))
-    for i, t in ipairs(last.turns or {}) do
+    if #(rec.turns or {}) == 0 then
+        add('_(no model turn recorded)_')
+        return
+    end
+    for i, t in ipairs(rec.turns) do
         add('')
         if t.kind == 'apply_patch' or t.kind == 'content_patch' then
             local status = (t.applied == true and 'applied ✓')
                 or (t.applied == false and 'did NOT apply ✗')
                 or 'discarded'
-            add(('### %d · %s — %s'):format(i, t.kind, status))
+            add(('- turn %d · %s — %s'):format(i, t.kind, status))
             if t.error then
-                add('')
-                add('error: ' .. tostring(t.error))
+                add('  error: ' .. tostring(t.error))
             end
         elseif t.kind == 'read' then
             local tail = t.refused and ' — refused (read budget)' or ''
-            add(('### %d · read %s%s'):format(i, fmt_args(t.args), tail))
+            add(('- turn %d · read %s%s'):format(i, fmt_args(t.args), tail))
         elseif t.kind == 'no_edit' then
-            add(('### %d · no edit'):format(i))
+            add(('- turn %d · no edit'):format(i))
         else
-            add(('### %d · %s'):format(i, t.kind or 'response'))
+            add(('- turn %d · %s'):format(i, t.kind or 'response'))
         end
 
         if t.reasoning then
-            add('')
-            add('reasoning:')
+            add('  reasoning:')
             block(t.reasoning)
         end
         if t.patch then
-            add('')
-            add('patch:')
+            add('  patch:')
             block(t.patch)
         elseif t.content and t.kind ~= 'apply_patch' then
-            add('')
-            add('content:')
+            add('  content:')
             block(t.content)
         end
     end
+end
 
+---@param history table[]
+---@return string[]
+local function render(history)
+    local L = {}
+    local function add(s)
+        table.insert(L, s)
+    end
+    local n = #history
+
+    add(('# Minuet duet · session (%d prediction%s)'):format(n, n == 1 and '' or 's'))
     add('')
-    add('---')
-    add('press `q` / `<Esc>` to close · `<leader>M` toggles')
+    add('newest first · `q` / `<Esc>` to close · `<leader>M` toggles')
+
+    for i = n, 1, -1 do
+        local rec = history[i]
+        add('')
+        add('---')
+        add(('## #%d · %s · %s'):format(i, rec.time or '?', rec.mode or '?'))
+        add(('outcome: **%s**  ·  result: **%s**'):format(tostring(rec.outcome), tostring(rec.result or '—')))
+        render_turns(L, rec)
+
+        -- Full inputs only for the most recent prediction (avoid repeating the
+        -- whole file for every entry).
+        if i == n then
+            add('')
+            add('### inputs · system prompt')
+            add('')
+            for _, line in ipairs(vim.split(rec.system or '', '\n', { plain = true })) do
+                add(line)
+            end
+            add('')
+            add('### inputs · user turn (cursor note + recent edits + file)')
+            add('')
+            for _, line in ipairs(vim.split(rec.user or '', '\n', { plain = true })) do
+                add(line)
+            end
+        end
+    end
     return L
 end
 
---- Open (or, if already open, close) the introspection float for `last`.
----@param last table? the duet `M.last` transcript
-function M.toggle(last)
+--- Open (or, if already open, close) the introspection float.
+---@param history table[]? the duet `M.history` list of prediction records
+function M.toggle(history)
     if is_open() then
         M.close()
         return
     end
-    if not last then
+    if not history or #history == 0 then
         vim.notify('Minuet duet: no prediction captured yet. Trigger a prediction first.', vim.log.levels.INFO)
         return
     end
 
     local buf = api.nvim_create_buf(false, true)
-    api.nvim_buf_set_lines(buf, 0, -1, false, render(last))
+    api.nvim_buf_set_lines(buf, 0, -1, false, render(history))
     vim.bo[buf].modifiable = false
     vim.bo[buf].filetype = 'markdown'
     vim.bo[buf].bufhidden = 'wipe'

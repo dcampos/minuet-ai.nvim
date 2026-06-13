@@ -17,9 +17,24 @@ local internal = {
     debounce = {}, -- bufnr -> uv_timer
 }
 
--- Transcript of the most recent prediction (inputs / model turns / outcome),
--- surfaced by `:Minuet duet inspect`. Set in predict(), filled in run_loop().
+-- Session transcript surfaced by `:Minuet duet inspect`: one record per
+-- prediction (inputs / model turns / outcome / user result). M.last is the most
+-- recent; M.history keeps the recent run so you can review what the model
+-- inferred over time and which suggestions you accepted / ignored / rejected.
 M.last = nil
+M.history = {}
+local HISTORY_MAX = 12
+
+--- Record the user's disposition on the prediction whose preview is on screen.
+--- `force` overrides the default (only settle a still-"shown" record), used when
+--- the user explicitly accepts/dismisses/cycles.
+local function settle(result, force)
+    local rec = internal.shown
+    if rec and (force or rec.result == 'shown') then
+        rec.result = result
+    end
+    internal.shown = nil
+end
 
 local function record_turn(ctx, turn)
     if ctx.last then
@@ -194,6 +209,10 @@ function run_loop(ctx)
                     })
                     if applied then
                         set_outcome(ctx, 'preview shown')
+                        if ctx.last then
+                            ctx.last.result = 'shown'
+                        end
+                        internal.shown = ctx.last
                         ctx.state.pending_seq = nil
                         show_preview(ctx.bufnr, ctx.state, ctx.buf_lines, new_lines, ctx.changedtick, patch)
                         return
@@ -219,6 +238,10 @@ function run_loop(ctx)
                 record_turn(ctx, { kind = 'content_patch', reasoning = reasoning, content = content, patch = content, applied = applied, error = err })
                 if applied then
                     set_outcome(ctx, 'preview shown')
+                    if ctx.last then
+                        ctx.last.result = 'shown'
+                    end
+                    internal.shown = ctx.last
                     ctx.state.pending_seq = nil
                     show_preview(ctx.bufnr, ctx.state, ctx.buf_lines, new_lines, ctx.changedtick, content)
                 else
@@ -257,6 +280,8 @@ local function predict(mode, opts)
     opts = opts or {}
     local bufnr = api.nvim_get_current_buf()
     local state = get_state(bufnr)
+    -- A preview still on screen when a new prediction starts was passed over.
+    settle('ignored', false)
     clear_state(bufnr, state)
 
     local s = scfg()
@@ -286,7 +311,12 @@ local function predict(mode, opts)
         user = messages[2].content,
         turns = {},
         outcome = 'pending',
+        result = nil, -- user disposition: shown/accepted/dismissed/rejected/ignored
     }
+    table.insert(M.history, M.last)
+    if #M.history > HISTORY_MAX then
+        table.remove(M.history, 1)
+    end
 
     run_loop {
         bufnr = bufnr,
@@ -311,10 +341,13 @@ local function apply()
         return
     end
     if utils.get_changedtick(bufnr) ~= state.changedtick then
+        settle('ignored', false)
         clear_state(bufnr, state)
         utils.notify('Minuet duet prediction is stale and has been discarded.', 'warn', vim.log.levels.WARN)
         return
     end
+
+    settle('accepted', true)
 
     local original = state.original_lines
     local proposed = state.proposed_lines
@@ -333,6 +366,7 @@ end
 
 local function dismiss()
     local bufnr = api.nvim_get_current_buf()
+    settle('dismissed', true)
     clear_state(bufnr, get_state(bufnr))
 end
 
@@ -341,6 +375,7 @@ local function cycle()
     local state = get_state(bufnr)
     local reject = state.proposed_patch
     local mode = state.mode or 'manual'
+    settle('rejected (cycled)', true)
     clear_state(bufnr, state)
     predict(mode, { reject_patch = reject })
 end
@@ -367,6 +402,8 @@ end
 -- and optionally auto-trigger.
 local function on_edit(info)
     local bufnr = info.buf
+    -- An edit while a preview is up means the user passed it over.
+    settle('ignored', false)
     local state = internal.states[bufnr]
     if state then
         clear_state(bufnr, state)
@@ -403,10 +440,10 @@ local action = {
     dismiss = dismiss,
     cycle = cycle,
     toggle = toggle,
-    -- Toggle the introspection float showing the last prediction's inputs,
-    -- model reasoning, patch and outcome.
+    -- Toggle the introspection float showing the session: each prediction's
+    -- model reasoning, patch, outcome and the result (accepted/ignored/...).
     inspect = function()
-        require('minuet.duet.inspect').toggle(M.last)
+        require('minuet.duet.inspect').toggle(M.history)
     end,
     is_visible = function()
         local bufnr = api.nvim_get_current_buf()
