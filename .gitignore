@@ -6,3 +6,6 @@
 /.codex
 nvim.log
 /scripts/*
+
+# local scratch / experiments
+/tmp/
