@@ -89,6 +89,13 @@ local function is_normal_mode()
     return api.nvim_get_mode().mode:sub(1, 1) == 'n'
 end
 
+local function auto_active()
+    if M.auto_enabled ~= nil then
+        return M.auto_enabled
+    end
+    return require('minuet').config.duet.session.auto_trigger
+end
+
 --- Assemble the message list for a prediction: system (+ capability reminder)
 --- and the session user turn (recent edits + cursor file), plus an optional
 --- "propose a different edit" nudge for cycling.
@@ -362,6 +369,18 @@ local function apply()
     pcall(api.nvim_win_set_cursor, 0, { target_row, #line })
 
     clear_state(bufnr, state)
+
+    -- Burst: chain straight into the next prediction when auto-trigger is on.
+    -- `nvim_buf_set_lines` does not fire TextChanged, so the edit-capture autocmd
+    -- never sees this accept; fire it here (no debounce) so consecutive accepts
+    -- feel instant.
+    if auto_active() then
+        vim.schedule(function()
+            if api.nvim_buf_is_loaded(bufnr) and api.nvim_get_current_buf() == bufnr and is_normal_mode() then
+                predict 'auto'
+            end
+        end)
+    end
 end
 
 local function dismiss()
@@ -389,13 +408,6 @@ local function toggle()
     -- User-initiated status: notify directly (always shown), matching the
     -- virtualtext/cmp toggle convention rather than the gated utils.notify.
     vim.notify('Minuet duet auto-trigger ' .. (M.auto_enabled and 'enabled' or 'disabled'), vim.log.levels.INFO)
-end
-
-local function auto_active()
-    if M.auto_enabled ~= nil then
-        return M.auto_enabled
-    end
-    return scfg().auto_trigger
 end
 
 -- Debounced per-buffer handler for edits: capture history, invalidate preview,
