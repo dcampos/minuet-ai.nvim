@@ -57,7 +57,6 @@ local function build_messages(bufnr, reject_patch)
     local s = scfg()
     local system = s.system .. '\n\n' .. s.capability_reminder
     local user = session.build_user_turn(bufnr, {
-        cursor_marker = s.cursor_marker,
         ctx_lines = s.history_context_lines,
     })
     if reject_patch then
@@ -132,7 +131,12 @@ function run_loop(ctx)
 
                 if name == 'read' then
                     if ctx.reads >= (s.max_reads or 2) then
-                        utils.notify('Minuet duet: read limit reached.', 'verbose', vim.log.levels.INFO)
+                        -- Read budget exhausted: stop rather than service another read,
+                        -- otherwise a model that keeps calling `read` loops unbounded
+                        -- (reads do not spend an attempt).
+                        utils.notify('Minuet duet: read limit reached; no patch produced.', 'verbose', vim.log.levels.INFO)
+                        ctx.state.pending_seq = nil
+                        return
                     end
                     local content = tools.read_result(ctx.bufnr, args)
                     table.insert(ctx.messages, assistant_echo(message))
@@ -284,11 +288,9 @@ local function toggle()
         enabled = scfg().auto_trigger
     end
     M.auto_enabled = not enabled
-    utils.notify(
-        'Minuet duet auto-trigger ' .. (M.auto_enabled and 'enabled' or 'disabled'),
-        'info',
-        vim.log.levels.INFO
-    )
+    -- User-initiated status: notify directly (always shown), matching the
+    -- virtualtext/cmp toggle convention rather than the gated utils.notify.
+    vim.notify('Minuet duet auto-trigger ' .. (M.auto_enabled and 'enabled' or 'disabled'), vim.log.levels.INFO)
 end
 
 local function auto_active()

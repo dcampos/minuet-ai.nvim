@@ -177,8 +177,10 @@ local function make_openai_compatible_options()
         few_shots = default_few_shots,
         chat_input = vim.deepcopy(default_chat_input),
         optional = {
-            -- NES wants low latency and minimal reasoning.
-            reasoning = { effort = 'low' },
+            -- `effort = 'low'` makes gpt-oss-120b misread the edit pattern and
+            -- propose reverts / cursor-marker no-ops on NES; 'medium' fixes that
+            -- (next-edit propagation across lines) for an acceptable latency cost.
+            reasoning = { effort = 'medium' },
             provider = { sort = 'throughput' },
         },
         transform = {},
@@ -186,33 +188,40 @@ local function make_openai_compatible_options()
 end
 
 -- NES (apply_patch) session prompt. The model receives the user's recent edits
--- (apply_patch dialect) and the current file with a cursor marker, and predicts
--- the single next edit via the apply_patch tool.
-local function make_nes_system(cursor_marker, no_edit_token)
+-- (apply_patch dialect), the current file, and the cursor position as a SEPARATE
+-- note (kept out of the file/patch text, which is the in-distribution apply_patch
+-- content the model handles well). It predicts the single next edit.
+--
+-- Prompt tuned against gpt-oss-120b: at reasoning effort `low`, and with a vaguer
+-- "most likely next edit" instruction, the model reverts recent edits or stalls;
+-- spelling out the two intents (finish-at-cursor vs continue-a-multi-site-change),
+-- the exact-match requirement, and "never revert" makes apply_patch land reliably.
+local function make_nes_system(no_edit_token)
     return ([[You are a next-edit-prediction engine inside the user's code editor.
 
-You are given the user's recent edits (in apply_patch dialect, oldest to newest)
-and the current file with a %s marker showing the cursor position. Predict the
-SINGLE smallest next edit the user is most likely to make, and emit it by calling
-the `apply_patch` tool.
+You are given the user's recent edits (in apply_patch dialect, oldest to newest),
+the current file, and—separately—the cursor position. Predict the user's SINGLE
+next edit and emit it by calling the `apply_patch` tool.
+
+The next edit is usually one of:
+- finishing or fixing the edit in progress AT the cursor, or
+- the next site of a repetitive change the user is making across the file (such as
+  a rename), which is frequently on a DIFFERENT line. Infer the change from the
+  recent edits and apply it to the next not-yet-changed occurrence.
 
 Rules:
-- Emit exactly ONE small edit. On a multi-site change such as a rename, emit only
-  the NEXT occurrence, not all of them.
-- You only have the `*** Update File` capability of apply_patch: a single small
-  hunk. No `*** Add File`, `*** Delete File`, or `*** Move to`.
+- Emit exactly ONE small `*** Update File` hunk. No `*** Add File`, `*** Delete
+  File`, or `*** Move to`.
 - The patch must apply to the CURRENT file: context and removed (`-`) lines must
-  match the real buffer exactly. If unsure of the exact text, call `read` first,
+  match the buffer EXACTLY. If you are unsure of the exact text, call `read` first,
   then emit the patch.
-- The %s marker is not real text; never include it in a patch.
+- The cursor position is given to you separately as a note; never put a cursor
+  marker or annotation inside a patch.
+- Never revert or undo a recent edit, and never emit a no-op patch.
 - If no edit is warranted, reply with the text `%s` and do not call a tool.]]):format(
-        cursor_marker,
-        cursor_marker,
         no_edit_token
     )
 end
-
-local DUET_CURSOR_MARKER = '<|cursor|>'
 local DUET_NO_EDIT_TOKEN = '*** No Edit'
 
 ---@alias minuet.DuetChatInputFunction fun(context: table): string
@@ -263,11 +272,11 @@ local M = {
     },
     -- NES session settings (apply_patch flow). See duet-nes-spec.md.
     session = {
-        cursor_marker = DUET_CURSOR_MARKER,
         no_edit_token = DUET_NO_EDIT_TOKEN,
-        system = make_nes_system(DUET_CURSOR_MARKER, DUET_NO_EDIT_TOKEN),
+        system = make_nes_system(DUET_NO_EDIT_TOKEN),
         capability_reminder = 'Reminder: emit exactly one small `*** Update File` hunk via the apply_patch '
-            .. 'tool; no Add/Delete/Move; context and `-` lines must match the current buffer exactly.',
+            .. 'tool; no Add/Delete/Move; context and `-` lines must match the current buffer exactly; '
+            .. 'the cursor is provided as a separate note—never put a cursor marker in a patch.',
         history_context_lines = 8,
         max_edits = 20,
         idle_minutes = 20,

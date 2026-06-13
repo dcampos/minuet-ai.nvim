@@ -151,19 +151,36 @@ function M.clear(bufnr)
     M.states[bufnr] = nil
 end
 
---- Build the user turn for a prediction: the recent edits (seed + running log)
---- followed by the current file with a cursor marker. The system prompt,
---- few-shots and tool definitions live in config.lua / the backend.
+--- Build the user turn for a prediction: a cursor note, the recent edits (seed +
+--- running log), then the clean current file. The cursor is fed as a SEPARATE
+--- note (not an inline marker) so the file/patch text stays in-distribution for
+--- the apply_patch-trained model. The system prompt and tool definitions live in
+--- config.lua / the backend.
 ---@param bufnr integer
----@param opts { cursor_marker?: string, ctx_lines?: integer }
+---@param opts? { ctx_lines?: integer }
 ---@return string
 function M.build_user_turn(bufnr, opts)
     opts = opts or {}
-    local marker = opts.cursor_marker or '<|cursor|>'
     local state = M.get_state(bufnr)
     local path = buf_path(bufnr)
+    local cur = get_lines(bufnr)
 
     local parts = {}
+
+    -- Cursor as a separate channel: a note kept OUT of the file/patch text. An
+    -- inline marker measurably increased reverts and got copied into patches.
+    local pos = vim.api.nvim_win_get_cursor(0)
+    local row, col = pos[1], pos[2]
+    table.insert(
+        parts,
+        ('Editor cursor: line %d, column %d (1-based). That line currently reads: `%s`'):format(
+            row,
+            col + 1,
+            cur[row] or ''
+        )
+    )
+    table.insert(parts, '')
+
     local all_edits = {}
     vim.list_extend(all_edits, state.seed)
     vim.list_extend(all_edits, state.edits)
@@ -174,14 +191,7 @@ function M.build_user_turn(bufnr, opts)
         table.insert(parts, '')
     end
 
-    -- Current file with the cursor marker inserted at the window cursor.
-    local cur = get_lines(bufnr)
-    local pos = vim.api.nvim_win_get_cursor(0)
-    local row, col = pos[1], pos[2]
-    if cur[row] then
-        cur[row] = cur[row]:sub(1, col) .. marker .. cur[row]:sub(col + 1)
-    end
-    table.insert(parts, ('Current file `%s` (%s marks the cursor; it is not real text):'):format(path, marker))
+    table.insert(parts, ('Current file `%s`:'):format(path))
     table.insert(parts, '')
     table.insert(parts, table.concat(cur, '\n'))
 

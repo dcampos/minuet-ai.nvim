@@ -93,7 +93,7 @@ return {
         end,
     },
     {
-        name = 'session.build_user_turn includes recent edits and a cursor marker',
+        name = 'session.build_user_turn includes recent edits and a separate cursor note',
         run = function()
             local bufnr = helpers.create_buffer({ 'x = 1', 'y = 2' }, { 1, 5 })
             session.clear(bufnr)
@@ -103,9 +103,11 @@ return {
             vim.api.nvim_win_set_cursor(0, { 1, 5 })
             session.capture(bufnr, 3)
 
-            local turn = session.build_user_turn(bufnr, { cursor_marker = '<|cursor|>', ctx_lines = 3 })
+            local turn = session.build_user_turn(bufnr, { ctx_lines = 3 })
             helpers.expect_match(turn, 'Recent edits %(oldest to newest%):')
-            helpers.expect_match(turn, '<|cursor|>')
+            -- cursor fed as a separate note (line 1), not an inline marker in the file text
+            helpers.expect_match(turn, 'Editor cursor: line 1')
+            helpers.expect_falsy(turn:find('<|cursor|>', 1, true), 'file text must stay clean of cursor markers')
             helpers.expect_match(turn, 'Current file')
             helpers.delete_buffer(bufnr)
         end,
