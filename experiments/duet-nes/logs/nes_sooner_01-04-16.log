@@ -1,0 +1,7 @@
+"sooner" bench · effort=medium · N=8 · single first turn
+metrics: acted=apply_patch (not read), forward=correct next rename, read=hesitated
+----------------------------------------------------------------------  k=1 shipped  +rr+r+++
+  -> acted 5/8  forward 5/8  read 3/8  badpatch 0/8  k=1 eager    ++++++++
+  -> acted 8/8  forward 8/8  read 0/8  badpatch 0/8  k=2 shipped  rrrrr+r+
+  -> acted 2/8  forward 2/8  read 6/8  badpatch 0/8  k=2 eager    +++++++r
+  -> acted 7/8  forward 7/8  read 1/8  badpatch 0/8

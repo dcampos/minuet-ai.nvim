@@ -1,0 +1,29 @@
+bench effort=medium N=5 stages=2,5 structures=current_marker,current_note,current_nomarker prompts=baseline,improved
+(per-sample marks: +=apply_ok&forward  ~=apply_ok&revert/noop  x=no valid patch)----------------------------------------------------------------------  k=2 baseline  current_marker    ++x+x
+  -> apply_ok 3/5  forward 3/5  avg_att 1.2 avg_read 0.8  k=2 baseline  current_note      ~~+x+
+  -> apply_ok 4/5  forward 2/5  avg_att 0.0 avg_read 1.0  k=2 baseline  current_nomarker  +++++
+  -> apply_ok 5/5  forward 5/5  avg_att 0.0 avg_read 0.8  k=2 improved  current_marker    +++++
+  -> apply_ok 5/5  forward 5/5  avg_att 0.0 avg_read 1.0  k=2 improved  current_note      +++++
+  -> apply_ok 5/5  forward 5/5  avg_att 0.0 avg_read 1.0  k=2 improved  current_nomarker  ++x~+
+  -> apply_ok 4/5  forward 3/5  avg_att 0.2 avg_read 1.4  k=5 baseline  current_marker    x++++
+  -> apply_ok 4/5  forward 4/5  avg_att 0.6 avg_read 0.8  k=5 baseline  current_note      +++++
+  -> apply_ok 5/5  forward 5/5  avg_att 0.0 avg_read 0.6  k=5 baseline  current_nomarker  +x+++
+  -> apply_ok 4/5  forward 4/5  avg_att 0.6 avg_read 0.4  k=5 improved  current_marker    ++x++
+  -> apply_ok 4/5  forward 4/5  avg_att 0.0 avg_read 1.2  k=5 improved  current_note      +++++
+  -> apply_ok 5/5  forward 5/5  avg_att 0.0 avg_read 0.8  k=5 improved  current_nomarker  ~++++
+  -> apply_ok 5/5  forward 4/5  avg_att 0.0 avg_read 0.8
+======================================================================
+k=2 baseline  current_marker    apply_ok 3/5  forward 3/5  avg_att 1.2 avg_read 0.8
+k=2 baseline  current_note      apply_ok 4/5  forward 2/5  avg_att 0.0 avg_read 1.0
+k=2 baseline  current_nomarker  apply_ok 5/5  forward 5/5  avg_att 0.0 avg_read 0.8
+k=2 improved  current_marker    apply_ok 5/5  forward 5/5  avg_att 0.0 avg_read 1.0
+k=2 improved  current_note      apply_ok 5/5  forward 5/5  avg_att 0.0 avg_read 1.0
+k=2 improved  current_nomarker  apply_ok 4/5  forward 3/5  avg_att 0.2 avg_read 1.4
+k=5 baseline  current_marker    apply_ok 4/5  forward 4/5  avg_att 0.6 avg_read 0.8
+k=5 baseline  current_note      apply_ok 5/5  forward 5/5  avg_att 0.0 avg_read 0.6
+k=5 baseline  current_nomarker  apply_ok 4/5  forward 4/5  avg_att 0.6 avg_read 0.4
+k=5 improved  current_marker    apply_ok 4/5  forward 4/5  avg_att 0.0 avg_read 1.2
+k=5 improved  current_note      apply_ok 5/5  forward 5/5  avg_att 0.0 avg_read 0.8
+k=5 improved  current_nomarker  apply_ok 5/5  forward 4/5  avg_att 0.0 avg_read 0.8
+----------------------------------------------------------------------
+done. effort=medium
