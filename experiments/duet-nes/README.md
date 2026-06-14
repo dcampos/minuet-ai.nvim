@@ -60,6 +60,10 @@ INCEPTION_API_KEY=... OPENROUTER_API_KEY=... \
 - "Sooner": telling the model to act on a single edit and to skip the redundant
   `read` (the whole file is already provided) takes first-turn action from ~5/8 to
   8/8 with 0 reads and 0 bad patches. (`nes_sooner`, `verify_prompt`)
+- Live simplex-tableau use exposed a generic granularity failure: after several
+  one-literal edits, the model sometimes inferred a whole row rewrite. The prompt
+  now tells NES to match the user's edit granularity (one literal/token in means
+  one literal/token out) without adding a table-specific parser.
 - Mercury Edit 2 integration details:
   - Direct Inception `/v1/edit/completions` works and returns a fenced rewritten
     editable region; the plugin converts that region back to apply_patch so the

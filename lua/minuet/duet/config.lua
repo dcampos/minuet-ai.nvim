@@ -230,6 +230,10 @@ Rules:
 - Be decisive: even a SINGLE recent edit can be the start of a repeated change.
   If it looks repeatable and other matching sites remain, propose the next one
   now rather than waiting for more examples.
+- Match the user's edit granularity. If recent edits change one literal/token at
+  a time, predict one literal/token change next; do not expand that workflow into
+  a whole-line or whole-block rewrite just because a larger transformation is
+  inferable.
 - The patch must apply to the CURRENT file: context and removed (`-`) lines must
   match the buffer EXACTLY. You already have the full current file above, so emit
   the patch directly; only call `read` to re-check the exact text if a patch you

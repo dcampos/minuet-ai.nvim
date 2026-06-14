@@ -130,9 +130,11 @@ Inception API (`INCEPTION_API_KEY`).
 
 One **minimal** apply_patch edit — on a multi-site rename emit only the **next**
 occurrence, not all. Be **decisive** (act on a single recent edit if it looks
-repeatable); **never revert** a recent edit or emit a **no-op**; never put the
-cursor note inside a patch. Or `read(...)`. Or `*** No Edit` (**auto only**;
-rejected and retried on a manual trigger).
+repeatable), but match the user's **edit granularity**: if recent edits are
+one literal/token at a time, predict one literal/token next rather than a
+whole-line or whole-block rewrite. **Never revert** a recent edit or emit a
+**no-op**; never put the cursor note inside a patch. Or `read(...)`. Or
+`*** No Edit` (**auto only**; rejected and retried on a manual trigger).
 ```
 *** Begin Patch
 *** Update File: <relpath>
