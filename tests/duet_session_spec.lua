@@ -30,6 +30,17 @@ return {
         end,
     },
     {
+        name = 'session.render_edit_diff emits conventional unidiff for Mercury Edit history',
+        run = function()
+            local block = session.render_edit_diff(before, after, 'net.lua', 8)
+            helpers.expect_match(block, '^%-%-%- net%.lua\n%+%+%+ net%.lua')
+            helpers.expect_match(block, '@@ %-')
+            helpers.expect_match(block, '\n%-local timeout = 30')
+            helpers.expect_match(block, '\n%+local timeout_secs = 30')
+            helpers.expect_falsy(block:find '%*%*%* Begin Patch')
+        end,
+    },
+    {
         name = 'session.render_edit output round-trips through apply_patch',
         run = function()
             local block = session.render_edit(before, after, 'net.lua', 8)
@@ -109,6 +120,28 @@ return {
             helpers.expect_match(turn, 'Editor cursor: line 1')
             helpers.expect_falsy(turn:find('<|cursor|>', 1, true), 'file text must stay clean of cursor markers')
             helpers.expect_match(turn, 'Current file')
+            helpers.delete_buffer(bufnr)
+        end,
+    },
+    {
+        name = 'session.build_inception_edit_turn uses Mercury Edit tags and unidiff history',
+        run = function()
+            local bufnr = helpers.create_buffer({ 'local x = 1', 'local y = 2', 'return x + y' }, { 2, 9 })
+            session.clear(bufnr)
+            session.rebase(bufnr)
+
+            vim.api.nvim_buf_set_lines(bufnr, 0, 1, false, { 'local x = 10' })
+            vim.api.nvim_win_set_cursor(0, { 2, 9 })
+            session.capture(bufnr, 3)
+
+            local prompt, region = session.build_inception_edit_turn(bufnr, { lines_before = 1, lines_after = 1 })
+            helpers.expect_match(prompt, '<|recently_viewed_code_snippets|>')
+            helpers.expect_match(prompt, '<|current_file_content|>')
+            helpers.expect_match(prompt, '<|code_to_edit|>')
+            helpers.expect_match(prompt, 'local y =<|cursor|> 2')
+            helpers.expect_match(prompt, '<|edit_diff_history|>')
+            helpers.expect_match(prompt, '^.-%-%-%- %[No Name%]\n%+%+%+ %[No Name%]')
+            helpers.expect_equal(region.original_lines, { 'local x = 10', 'local y = 2', 'return x + y' })
             helpers.delete_buffer(bufnr)
         end,
     },

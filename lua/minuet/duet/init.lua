@@ -360,7 +360,7 @@ function run_loop(ctx)
                 utils.notify('Minuet duet: model returned no usable edit.', 'verbose', vim.log.levels.INFO)
             end
         end)
-    end)
+    end, ctx)
 end
 
 ---@param mode? 'manual'|'auto'

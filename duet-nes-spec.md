@@ -99,6 +99,33 @@ cache-stable.
   (Codex re-anchor). Reads are capped (`max_reads`, 2) and **enforced** (hitting
   the cap stops the loop rather than re-requesting forever).
 
+## Mercury Edit 2 Provider
+
+`duet.provider = 'inception_edit'` uses Inception's Mercury Edit 2
+`/v1/edit/completions` endpoint instead of chat tool calls. The request is built
+in Mercury's native Next Edit format:
+
+```
+<|recently_viewed_code_snippets|> ... <|/recently_viewed_code_snippets|>
+<|current_file_content|>
+current_file_path: ...
+... full file, with <|code_to_edit|> around a small cursor-centered region ...
+<|/current_file_content|>
+<|edit_diff_history|>
+--- path
++++ path
+@@ -a,b +c,d @@
+...
+<|/edit_diff_history|>
+```
+
+Mercury returns the rewritten editable region in a Markdown fence. The transport
+converts that replacement back to a normal apply_patch hunk, so the existing
+preview/apply/disposition machinery stays unchanged. Endpoint probe result:
+direct Inception works; OpenRouter currently rejects `inception/mercury-edit-2`
+on `/chat/completions` as an invalid model ID, so this provider uses the direct
+Inception API (`INCEPTION_API_KEY`).
+
 ## Output
 
 One **minimal** apply_patch edit — on a multi-site rename emit only the **next**

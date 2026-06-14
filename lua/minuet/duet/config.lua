@@ -187,6 +187,21 @@ local function make_openai_compatible_options()
     }
 end
 
+local function make_inception_edit_options()
+    return {
+        model = 'mercury-edit-2',
+        api_key = 'INCEPTION_API_KEY',
+        end_point = 'https://api.inceptionlabs.ai/v1/edit/completions',
+        name = 'Inception Mercury Edit 2',
+        -- Inception recommends a small cursor-centered editable region for
+        -- latency. The full file is still present outside the code_to_edit tags.
+        lines_before = 5,
+        lines_after = 10,
+        max_tokens = 1000,
+        optional = {},
+    }
+end
+
 -- NES (apply_patch) session prompt. The model receives the user's recent edits
 -- (apply_patch dialect), the current file, and the cursor position as a SEPARATE
 -- note (kept out of the file/patch text, which is the in-distribution apply_patch
@@ -328,6 +343,7 @@ local M = {
         claude = make_claude_options(),
         gemini = make_gemini_options(),
         openai_compatible = make_openai_compatible_options(),
+        inception_edit = make_inception_edit_options(),
     },
 }
 
