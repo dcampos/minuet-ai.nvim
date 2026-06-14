@@ -177,10 +177,10 @@ local function make_openai_compatible_options()
         few_shots = default_few_shots,
         chat_input = vim.deepcopy(default_chat_input),
         optional = {
-            -- NES wants the lowest round-trip latency. `effort = 'low'` (the older,
-            -- vaguer prompt made it revert at low; the current decisive prompt holds
-            -- up). Pin Cerebras then Groq and disallow other (slower) providers.
-            reasoning = { effort = 'low' },
+            -- NES trades a little latency for reasoning quality: `effort = 'medium'`
+            -- (low reverts/stalls on harder multi-step edits like a tableau pivot).
+            -- Pin Cerebras then Groq and disallow other (slower) providers.
+            reasoning = { effort = 'medium' },
             provider = { order = { 'cerebras', 'groq' }, allow_fallbacks = false },
         },
         transform = {},
@@ -196,8 +196,8 @@ end
 -- "most likely next edit" instruction, the model reverts recent edits or stalls;
 -- spelling out the two intents (finish-at-cursor vs continue-a-multi-site-change),
 -- the exact-match requirement, and "never revert" makes apply_patch land reliably.
-local function make_nes_system(no_edit_token)
-    return ([[You are a next-edit-prediction engine inside the user's code editor.
+local function make_nes_system()
+    return [[You are a next-edit-prediction engine inside the user's code editor.
 
 You are given the user's recent edits (in apply_patch dialect, oldest to newest),
 the current file, and—separately—the cursor position. Predict the user's SINGLE
@@ -219,14 +219,35 @@ Rules:
   match the buffer EXACTLY. You already have the full current file above, so emit
   the patch directly; only call `read` to re-check the exact text if a patch you
   tried this turn failed to apply.
+- Your patch is applied at the occurrence NEAREST the cursor, so you do not need
+  to uniquely locate the edit or count lines. Emit the SMALLEST hunk that names
+  the change — usually a bare `@@` and just the one changed line as `-`/`+`. Do
+  NOT enumerate or count the file's lines, and do NOT call `read` merely to find a
+  line number: you already have the full file and the cursor note.
 - The cursor position is given to you separately as a note; never put a cursor
   marker or annotation inside a patch.
 - Never revert or undo a recent edit, and never emit a no-op patch.
-- If no edit is warranted, reply with the text `%s` and do not call a tool.]]):format(
-        no_edit_token
-    )
+
+Whether you may decline to propose an edit depends on how this prediction was
+triggered; that final instruction is given at the end of this system prompt.]]
 end
 local DUET_NO_EDIT_TOKEN = '*** No Edit'
+
+-- Whether declining (the no-edit token) is allowed depends on the trigger and is
+-- appended to the system prompt per prediction (see init.build_messages):
+--   auto-trigger fires on its own, so the model may legitimately decline;
+--   a manual trigger is an explicit user request, so it MUST produce an edit.
+local function make_auto_instruction(no_edit_token)
+    return 'This prediction was auto-triggered. If no edit is warranted, reply with the text `'
+        .. no_edit_token
+        .. '` and do not call a tool.'
+end
+local function make_manual_instruction(no_edit_token)
+    return 'This prediction was explicitly requested by the user, so you MUST propose a concrete next '
+        .. 'edit: emit exactly one apply_patch hunk. Declining with `'
+        .. no_edit_token
+        .. '` is not allowed here.'
+end
 
 ---@alias minuet.DuetChatInputFunction fun(context: table): string
 
@@ -277,7 +298,10 @@ local M = {
     -- NES session settings (apply_patch flow). See duet-nes-spec.md.
     session = {
         no_edit_token = DUET_NO_EDIT_TOKEN,
-        system = make_nes_system(DUET_NO_EDIT_TOKEN),
+        system = make_nes_system(),
+        -- Mode-specific trailing instruction (auto may decline, manual must not).
+        auto_instruction = make_auto_instruction(DUET_NO_EDIT_TOKEN),
+        manual_instruction = make_manual_instruction(DUET_NO_EDIT_TOKEN),
         capability_reminder = 'Reminder: emit exactly one small `*** Update File` hunk via the apply_patch '
             .. 'tool; no Add/Delete/Move; context and `-` lines must match the current buffer exactly; '
             .. 'the cursor is provided as a separate note—never put a cursor marker in a patch.',
@@ -288,6 +312,14 @@ local M = {
         capability_reminder_every = 5,
         max_attempts = 3,
         max_reads = 2,
+        -- Inter-diff memory: replay this session's earlier predictions (the model's
+        -- own patch + what the user did with it) as interleaved turns BEFORE the
+        -- full current file. Benchmarked to lift next-edit accuracy on multi-step
+        -- edits; see duet-nes-spec.md. Additive — never replaces the file.
+        prediction_memory = true,
+        prediction_memory_max = 8,
+        memory_preamble = 'Your earlier next-edit predictions this session (oldest first), each '
+            .. 'followed by what the user did with it:',
         auto_trigger = false,
         debounce_ms = 150,
     },

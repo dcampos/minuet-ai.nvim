@@ -1,7 +1,10 @@
 # Duet NES — apply_patch spec (v1, tuned; v2 direction noted)
 
 NES for `Minuet duet`. One model (`gpt-oss-120b` via OpenRouter, Cerebras/Groq),
-**no separate apply model**. **Normal mode only, single buffer.** Each prediction
+**no separate apply model**. **Normal mode only, single buffer; modifiable real
+file buffers only** (`buftype == ''` and `modifiable` — the inspect float,
+read-only views, and other scratch/special buffers are skipped, so an auto-trigger
+never leaks onto non-file content). Each prediction
 the model sees the recent user edits (apply_patch dialect), the current file, and
 the **cursor as a separate note** (kept out of the file/patch text); it emits one
 small Codex-style `apply_patch` (or calls `read`); we **validate by applying
@@ -24,7 +27,9 @@ before preview**. Rationale: `duet-nes-research.md`.
   immediate (no debounce). **Auto-trigger** fires on `TextChanged`/`InsertLeave`
   after `debounce_ms` (150). After an **accept**, when auto is on, the next
   prediction is fired **immediately** (no debounce) so bursts feel instant.
-- **Auto only**: model may decline via the **no-edit token** (`*** No Edit`).
+- **Auto only**: model may decline via the **no-edit token** (`*** No Edit`). A
+  **manual** trigger must produce an edit — a `*** No Edit` reply there is pushed
+  back to the model as invalid and it is asked to retry (spends an attempt).
 - **Inspect**: `:Minuet duet inspect` toggles a floating window with the session
   history (newest first): per prediction the model **reasoning**, emitted
   **patch**, `read()` calls, **outcome**, and **result**
@@ -33,16 +38,32 @@ before preview**. Rationale: `duet-nes-research.md`.
 
 ## Message assembly (as built)
 
-Each predict sends two messages (the user turn is **rebuilt from session state**
-per predict; the append-only KV-cached log below is still aspirational):
+Each predict sends: the system message, then the **inter-diff memory** (this
+session's earlier predictions replayed as interleaved turns), then the final user
+turn (rebuilt from session state):
 
 ```
-system : decisive NES system prompt  +  capability reminder
+system : decisive NES system prompt  +  capability reminder  +  decline policy
+         (decline policy: auto = may reply `*** No Edit`; manual = must emit an edit)
+memory : (prediction_memory, default on) preamble user turn, then per earlier
+         prediction this session: assistant = the patch it proposed,
+         user = the disposition ("The user accepted it." / "…did not use it." /
+         "…dismissed it." / "…rejected it and asked for a different edit").
+         Capped to the last `prediction_memory_max` (8); cleared on session reset.
 user   : 1 cursor note    ("Editor cursor: line L, column C; that line reads `…`")
          2 recent edits   ("Recent edits (oldest to newest):" + apply_patch blocks)
          3 current file   ("Current file `path`:" + ENTIRE buffer, clean)
          (cycle only) + "already proposed and rejected; propose a DIFFERENT edit"
 ```
+
+- **Inter-diff memory is ADDITIVE** — it precedes but never replaces the full
+  current file. Benchmarked on the duplicated-tableau pivot: replaying the model's
+  own prior guesses + accept/ignore dispositions lifted exact-next-cell hit rate
+  ~29% → ~42% at zero extra latency, while *replacing* the file with a diff log
+  (the model reconstructing state) regressed it. Re-feeding the model's reasoning
+  did not help (and the native `reasoning` field is dropped on history turns), so
+  only the facts (patch + disposition) are carried. Harnesses:
+  `experiments/duet-nes/scripts/nes_interdiff{,2,3}.lua`.
 
 - **Cursor is a separate note**, never an inline marker — an inline `<|cursor|>`
   is out-of-distribution for an apply_patch-trained model (it got copied into
@@ -56,16 +77,22 @@ user   : 1 cursor note    ("Editor cursor: line L, column C; that line reads `�
 - **Capability reminder** is currently appended to **every** system prompt (the
   `capability_reminder_every` cadence knob is defined but unused).
 
-Aspirational (not yet built): the **KV-cache-aware append-only log** — stable
-prefix (instructions, few-shots, full file at reset) + per-round appended turns
-(prev edits, model response + reasoning, user result), so the prefix stays
-cached. Today the system prompt is stable but the user turn is rebuilt each time;
-the per-prediction transcript that `inspect` shows is kept separately.
+Partly realized: the **inter-diff memory** above now carries the per-round
+**model response (its patch) + user result** as interleaved turns. Still
+aspirational is the full **KV-cache-aware** form — a stable cached prefix (full
+file at reset) with only diffs appended; today the memory is prepended but the
+final user turn (full file) is still rebuilt each predict, so the prefix is not
+cache-stable.
 
 ## Tools
 
 - **`apply_patch`** — Codex format, **Update File only**, **exact (non-fuzzy)
-  context match**.
+  context match**, **biased to the cursor**: when a hunk's context matches several
+  identical blocks (e.g. a duplicated table), it lands on the occurrence NEAREST
+  the cursor row instead of the topmost (a unique match is unaffected). `init`
+  passes the cursor row into `apply_patch.apply { cursor_row = … }`; the system
+  prompt tells the model minimal hunks suffice (no line-counting / no `read` for
+  line numbers).
 - **`read(range?)`** — returns current buffer content (single buffer). The prompt
   tells the model it **already has the full current file**, so emit directly and
   only `read` to re-check exact text **if a patch it tried this turn failed**
@@ -77,7 +104,8 @@ the per-prediction transcript that `inspect` shows is kept separately.
 One **minimal** apply_patch edit — on a multi-site rename emit only the **next**
 occurrence, not all. Be **decisive** (act on a single recent edit if it looks
 repeatable); **never revert** a recent edit or emit a **no-op**; never put the
-cursor note inside a patch. Or `read(...)`. Or `*** No Edit` (auto).
+cursor note inside a patch. Or `read(...)`. Or `*** No Edit` (**auto only**;
+rejected and retried on a manual trigger).
 ```
 *** Begin Patch
 *** Update File: <relpath>
@@ -98,7 +126,10 @@ predict(mode):
     if resp is read(range):
       if reads >= max_reads (=2): stop            -- enforced; no unbounded read loop
       append tool-result(buffer); continue
-    if resp == NO_EDIT: record; return
+    if resp == NO_EDIT:
+      if mode == auto: record; return                          -- declining is allowed
+      append assistant(resp) + user("`*** No Edit` invalid: manual trigger must edit")
+      attempt += 1; continue                                   -- manual: push back and retry
     ok, new_lines, err = apply_patch(buf_lines, resp)          -- exact, in-memory
     if ok: preview(buf -> new_lines); record turn; return
     append assistant(resp) + tool("apply_patch failed: " .. err .. "; read() then retry")
@@ -136,7 +167,7 @@ dismiss(): clear preview; mark result=dismissed
 ```
 provider           = openai_compatible → openai/gpt-oss-120b, OpenRouter
 request_timeout    = 15
-optional           = reasoning.effort = 'low'
+optional           = reasoning.effort = 'medium'   -- 'low' reverts/stalls on multi-step edits
                      provider = { order = { 'cerebras', 'groq' }, allow_fallbacks = false }
 session = {
   history_context_lines     = 8     -- context per past edit
@@ -146,6 +177,8 @@ session = {
   capability_reminder_every = 5     -- (defined; not yet used — reminder is every turn)
   max_attempts              = 3
   max_reads                 = 2     -- enforced
+  prediction_memory         = true  -- replay prior predictions + dispositions (interleaved)
+  prediction_memory_max     = 8     -- cap on replayed predictions; reset with the session
   auto_trigger              = false
   debounce_ms               = 150   -- auto-trigger only; manual + post-accept burst = no wait
   no_edit_token             = '*** No Edit'

@@ -46,6 +46,7 @@ end
 
 function M.create_buffer(lines, cursor)
     local bufnr = vim.api.nvim_create_buf(true, true)
+    vim.bo[bufnr].buftype = '' -- stand in for a real file buffer (duet skips scratch)
     vim.api.nvim_set_current_buf(bufnr)
     vim.api.nvim_buf_set_lines(bufnr, 0, -1, false, lines or { '' })
 

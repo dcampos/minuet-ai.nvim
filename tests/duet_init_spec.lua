@@ -156,7 +156,7 @@ return {
     {
         name = 'duet auto mode stays silent on a *** No Edit reply',
         run = function()
-            helpers.setup_root_config { duet = { preview = { cursor = '|' } } }
+            helpers.setup_root_config { duet = { preview = { cursor = '|' }, session = { auto_trigger = true } } }
             local captured = install_chat_stub()
             local duet = helpers.reload 'minuet.duet'
             duet.setup()
@@ -164,15 +164,133 @@ return {
             local bufnr = helpers.create_buffer({ 'local x = old' }, { 1, 12 })
             require('minuet.duet.session').rebase(bufnr)
 
-            -- drive the internal auto predict via the public manual path but feed a No Edit reply
-            duet.action.predict()
+            -- An auto prediction fires off the edit-capture autocmd (debounced).
+            vim.api.nvim_exec_autocmds('TextChanged', { buffer = bufnr })
+            helpers.wait_until(function()
+                return captured.callback ~= nil
+            end, 1000, 'auto-trigger did not fire a prediction')
+            -- The model is told it was auto-triggered, so declining is allowed.
+            helpers.expect_match(captured.messages[1].content, 'auto%-triggered')
+
             captured.callback { message = { role = 'assistant', content = '*** No Edit' } }
 
             vim.wait(50, function()
                 return false
             end, 10)
+            helpers.expect_equal(captured.calls, 1, 'auto No Edit should not re-request')
             helpers.expect_falsy(duet.action.is_visible(), 'no preview should render for No Edit')
             helpers.expect_equal(vim.api.nvim_buf_get_lines(bufnr, 0, -1, false), { 'local x = old' })
+            helpers.delete_buffer(bufnr)
+        end,
+    },
+    {
+        name = 'duet manual mode rejects *** No Edit and re-requests with an error',
+        run = function()
+            helpers.setup_root_config { duet = { preview = { cursor = '|' } } }
+            local captured = install_chat_stub()
+            local duet = helpers.reload 'minuet.duet'
+            duet.setup()
+
+            local bufnr = helpers.create_buffer({ 'local x = old', 'local y = old' }, { 1, 12 })
+            require('minuet.duet.session').rebase(bufnr)
+
+            duet.action.predict()
+            -- A manual trigger must produce an edit; the system prompt says so.
+            helpers.expect_match(captured.messages[1].content, 'MUST propose')
+            helpers.expect_falsy(captured.messages[1].content:find('auto%-triggered'), 'manual prompt must not offer the decline path')
+
+            -- Model declines anyway: the loop should push back an error and re-request.
+            captured.callback { message = { role = 'assistant', content = '*** No Edit' } }
+            helpers.wait_until(function()
+                return captured.calls == 2
+            end, 1000, 'manual No Edit did not trigger a re-request')
+            local pushback = captured.messages[#captured.messages]
+            helpers.expect_equal(pushback.role, 'user')
+            helpers.expect_match(pushback.content, 'invalid')
+
+            -- A real patch on the retry still applies cleanly.
+            captured.callback(patch_call(rename_patch))
+            helpers.wait_until(function()
+                return duet.action.is_visible()
+            end, 1000, 'preview did not render after the retry patch')
+            duet.action.apply()
+            helpers.expect_equal(
+                vim.api.nvim_buf_get_lines(bufnr, 0, -1, false),
+                { 'local x = new', 'local y = old' }
+            )
+            helpers.delete_buffer(bufnr)
+        end,
+    },
+    {
+        name = 'duet does not predict on a scratch/special buffer (e.g. the inspect float)',
+        run = function()
+            helpers.setup_root_config { duet = { preview = { cursor = '|' } } }
+            local captured = install_chat_stub()
+            local duet = helpers.reload 'minuet.duet'
+            duet.setup()
+
+            local bufnr = helpers.create_buffer({ '# Minuet duet · session' }, { 1, 1 })
+            vim.bo[bufnr].buftype = 'nofile' -- like the inspect float / scratch buffers
+            duet.action.predict()
+            helpers.expect_falsy(captured.callback, 'no chat request should fire on a non-file buffer')
+            helpers.delete_buffer(bufnr)
+        end,
+    },
+    {
+        name = 'duet auto-trigger ignores non-modifiable buffers',
+        run = function()
+            helpers.setup_root_config { duet = { preview = { cursor = '|' }, session = { auto_trigger = true } } }
+            local captured = install_chat_stub()
+            local duet = helpers.reload 'minuet.duet'
+            duet.setup()
+
+            local bufnr = helpers.create_buffer({ 'read only view' }, { 1, 1 })
+            vim.bo[bufnr].modifiable = false
+            vim.api.nvim_exec_autocmds('TextChanged', { buffer = bufnr })
+
+            vim.wait(50, function()
+                return false
+            end, 10)
+            helpers.expect_falsy(captured.callback, 'auto-trigger should not fire on a non-modifiable buffer')
+            helpers.delete_buffer(bufnr)
+        end,
+    },
+    {
+        name = 'duet replays a shown prediction + disposition as inter-diff memory next time',
+        run = function()
+            helpers.setup_root_config { duet = { preview = { cursor = '|' } } }
+            local captured = install_chat_stub()
+            local duet = helpers.reload 'minuet.duet'
+            duet.setup()
+
+            local bufnr = helpers.create_buffer({ 'local x = old', 'local y = old' }, { 1, 12 })
+            require('minuet.duet.session').rebase(bufnr)
+
+            -- first prediction -> patch shown -> accepted
+            duet.action.predict()
+            captured.callback(patch_call(rename_patch))
+            helpers.wait_until(function()
+                return duet.action.is_visible()
+            end, 1000, 'first preview did not render')
+            duet.action.apply()
+
+            -- second prediction: the accepted patch should be replayed as an
+            -- interleaved assistant turn, followed by its disposition.
+            duet.action.predict()
+            local msgs = captured.messages
+            helpers.expect_equal(msgs[1].role, 'system')
+            local asst_idx
+            for i, m in ipairs(msgs) do
+                if m.role == 'assistant' and type(m.content) == 'string' and m.content:find('local x = new', 1, true) then
+                    asst_idx = i
+                end
+            end
+            helpers.expect_truthy(asst_idx, 'the prior patch should be replayed as an assistant turn')
+            helpers.expect_equal(msgs[asst_idx + 1].role, 'user')
+            helpers.expect_match(msgs[asst_idx + 1].content, 'accepted')
+            -- the full current file still follows as the final user turn
+            helpers.expect_equal(msgs[#msgs].role, 'user')
+            helpers.expect_match(msgs[#msgs].content, 'Current file')
             helpers.delete_buffer(bufnr)
         end,
     },

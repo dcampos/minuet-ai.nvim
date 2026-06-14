@@ -166,4 +166,39 @@ return {
             helpers.expect_equal(ap.seek_sequence({ 'one' }, { 'a', 'b', 'c' }, 0, false), nil)
         end,
     },
+    {
+        name = 'apply_patch.seek_sequence bias picks the match nearest the cursor',
+        run = function()
+            local lines = { 'dup', 'x', 'x', 'x', 'dup' } -- 'dup' at rows 0 and 4
+            -- no bias: first match (Codex behaviour)
+            helpers.expect_equal(ap.seek_sequence(lines, { 'dup' }, 0, false), 0)
+            -- bias near the bottom occurrence: pick row 4
+            helpers.expect_equal(ap.seek_sequence(lines, { 'dup' }, 0, false, 4), 4)
+            -- bias near the top occurrence: pick row 0
+            helpers.expect_equal(ap.seek_sequence(lines, { 'dup' }, 0, false, 1), 0)
+        end,
+    },
+    {
+        name = 'apply_patch.apply with cursor_row lands on the duplicated block near the cursor',
+        run = function()
+            -- two identical tableaux; the model edits a row that exists in BOTH.
+            local buf = {
+                'tableau A',
+                '  z, 0, 0;',
+                'gap',
+                'tableau B',
+                '  z, 0, 0;',
+            }
+            local p = patch '*** Update File: t.typ\n@@\n-  z, 0, 0;\n+  z, 1, 0;'
+            -- cursor in the SECOND tableau (row 5, 1-based) -> edit lands there
+            local ok, lines = ap.apply(buf, p, { cursor_row = 5 })
+            helpers.expect_truthy(ok)
+            helpers.expect_equal(lines[5], '  z, 1, 0;')
+            helpers.expect_equal(lines[2], '  z, 0, 0;') -- first block untouched
+            -- without the cursor, it falls back to the first match (the wrong block)
+            local ok2, lines2 = ap.apply(buf, p)
+            helpers.expect_truthy(ok2)
+            helpers.expect_equal(lines2[2], '  z, 1, 0;')
+        end,
+    },
 }

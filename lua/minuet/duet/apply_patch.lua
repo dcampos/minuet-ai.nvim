@@ -398,12 +398,42 @@ end
 -- Matcher (mirrors seek_sequence.rs) — 0-based start, 0-based result
 -- ---------------------------------------------------------------------------
 
+--- Scan one match tier. Without `bias` returns the first match (Codex behaviour);
+--- with `bias` (a 0-based row) returns the match whose start is CLOSEST to it, so
+--- a patch whose context appears in several identical blocks lands on the one
+--- nearest the cursor instead of always the topmost. A unique match is unaffected.
+---@param eq fun(a: string, b: string): boolean
+---@return integer? index 0-based
+local function scan_tier(lines, pattern, search_start, m, eq, bias)
+    local n = #lines
+    local best
+    for i = search_start, n - m do
+        local ok = true
+        for k = 1, m do
+            if not eq(lines[i + k], pattern[k]) then
+                ok = false
+                break
+            end
+        end
+        if ok then
+            if not bias then
+                return i
+            end
+            if not best or math.abs(i - bias) < math.abs(best - bias) then
+                best = i
+            end
+        end
+    end
+    return best
+end
+
 ---@param lines string[]
 ---@param pattern string[]
 ---@param start integer 0-based
 ---@param eof boolean
+---@param bias? integer 0-based row to prefer when several matches exist (cursor proximity)
 ---@return integer? index 0-based
-function M.seek_sequence(lines, pattern, start, eof)
+function M.seek_sequence(lines, pattern, start, eof, bias)
     local n = #lines
     local m = #pattern
     if m == 0 then
@@ -414,47 +444,22 @@ function M.seek_sequence(lines, pattern, start, eof)
     end
     local search_start = (eof and n >= m) and (n - m) or start
 
-    -- exact
-    for i = search_start, n - m do
-        local ok = true
-        for k = 1, m do
-            if lines[i + k] ~= pattern[k] then
-                ok = false
-                break
-            end
-        end
-        if ok then
-            return i
-        end
+    local exact = scan_tier(lines, pattern, search_start, m, function(a, b)
+        return a == b
+    end, bias)
+    if exact then
+        return exact
     end
-    -- rstrip
-    for i = search_start, n - m do
-        local ok = true
-        for k = 1, m do
-            if rtrim(lines[i + k]) ~= rtrim(pattern[k]) then
-                ok = false
-                break
-            end
-        end
-        if ok then
-            return i
-        end
-    end
-    -- trim both
-    for i = search_start, n - m do
-        local ok = true
-        for k = 1, m do
-            if trim(lines[i + k]) ~= trim(pattern[k]) then
-                ok = false
-                break
-            end
-        end
-        if ok then
-            return i
-        end
+    local rstripped = scan_tier(lines, pattern, search_start, m, function(a, b)
+        return rtrim(a) == rtrim(b)
+    end, bias)
+    if rstripped then
+        return rstripped
     end
     -- TODO: unicode-normalisation tier (Codex's 4th pass) omitted for v1.
-    return nil
+    return scan_tier(lines, pattern, search_start, m, function(a, b)
+        return trim(a) == trim(b)
+    end, bias)
 end
 
 -- ---------------------------------------------------------------------------
@@ -465,14 +470,15 @@ end
 ---@param chunks table[]
 ---@param path string for error messages
 ---@return string[]? new_lines, string? err
-function M.compute_new_lines(original_lines, chunks, path)
+---@param bias? integer 0-based row to prefer among duplicate matches (cursor proximity)
+function M.compute_new_lines(original_lines, chunks, path, bias)
     path = path or '<buffer>'
     local replacements = {} -- { {start0, old_len, seg}, ... }
     local line_index = 0
 
     for _, chunk in ipairs(chunks) do
         if chunk.change_context then
-            local idx = M.seek_sequence(original_lines, { chunk.change_context }, line_index, false)
+            local idx = M.seek_sequence(original_lines, { chunk.change_context }, line_index, false, bias)
             if idx then
                 line_index = idx + 1
             else
@@ -486,14 +492,14 @@ function M.compute_new_lines(original_lines, chunks, path)
         else
             local pattern = chunk.old_lines
             local new_slice = chunk.new_lines
-            local found = M.seek_sequence(original_lines, pattern, line_index, chunk.is_end_of_file)
+            local found = M.seek_sequence(original_lines, pattern, line_index, chunk.is_end_of_file, bias)
 
             if not found and pattern[#pattern] == '' then
                 pattern = vim.list_slice(pattern, 1, #pattern - 1)
                 if new_slice[#new_slice] == '' then
                     new_slice = vim.list_slice(new_slice, 1, #new_slice - 1)
                 end
-                found = M.seek_sequence(original_lines, pattern, line_index, chunk.is_end_of_file)
+                found = M.seek_sequence(original_lines, pattern, line_index, chunk.is_end_of_file, bias)
             end
 
             if found then
@@ -557,7 +563,10 @@ function M.apply(lines, patch, opts)
         return false, nil, invalid_patch('patch contained no *** Update File hunk')
     end
 
-    local new_lines, cerr = M.compute_new_lines(lines, update_hunk.chunks, update_hunk.path)
+    -- Bias matching toward the cursor so a patch whose context appears in several
+    -- identical blocks lands on the one the user is editing (0-based row).
+    local bias = opts.cursor_row and (opts.cursor_row - 1) or nil
+    local new_lines, cerr = M.compute_new_lines(lines, update_hunk.chunks, update_hunk.path, bias)
     if not new_lines then
         return false, nil, cerr
     end

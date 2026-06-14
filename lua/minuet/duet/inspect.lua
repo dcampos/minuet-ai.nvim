@@ -37,8 +37,12 @@ end
 ---@param L string[]
 ---@param rec table
 local function render_turns(L, rec)
+    -- Split on newlines: nvim_buf_set_lines rejects items containing '\n', and
+    -- some fields (outcome, apply_patch errors) can be multi-line.
     local function add(s)
-        table.insert(L, s)
+        for _, line in ipairs(vim.split(s or '', '\n', { plain = true })) do
+            table.insert(L, line)
+        end
     end
     local function block(text)
         for _, line in ipairs(vim.split(text or '', '\n', { plain = true })) do
@@ -87,8 +91,12 @@ end
 ---@return string[]
 local function render(history)
     local L = {}
+    -- Split on newlines: nvim_buf_set_lines rejects items containing '\n', and
+    -- some fields (outcome, apply_patch errors) can be multi-line.
     local function add(s)
-        table.insert(L, s)
+        for _, line in ipairs(vim.split(s or '', '\n', { plain = true })) do
+            table.insert(L, line)
+        end
     end
     local n = #history
 
