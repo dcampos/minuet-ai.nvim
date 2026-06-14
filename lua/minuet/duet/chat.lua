@@ -81,14 +81,18 @@ local function request_inception_edit(opts, callback, ctx)
             local choice = decoded.choices and decoded.choices[1]
             local content = choice and choice.message and choice.message.content
             if type(content) ~= 'string' then
-                callback { error = 'no editable-region content in response: ' .. tostring((out.stdout or ''):sub(1, 200)) }
+                callback {
+                    error = 'no editable-region content in response: ' .. tostring((out.stdout or ''):sub(1, 200)),
+                }
                 return
             end
 
             local replacement = split_region(content)
             local patch = session.render_edit(region.original_lines, replacement, region.path, 0)
             if not patch then
-                callback { message = { role = 'assistant', content = require('minuet').config.duet.session.no_edit_token } }
+                callback {
+                    message = { role = 'assistant', content = require('minuet').config.duet.session.no_edit_token },
+                }
                 return
             end
             callback { message = { role = 'assistant', content = patch } }

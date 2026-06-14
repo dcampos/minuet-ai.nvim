@@ -280,12 +280,13 @@ function M.build_inception_edit_turn(bufnr, opts)
     end
     table.insert(parts, '<|/edit_diff_history|>')
 
-    return table.concat(parts, '\n'), {
-        path = path,
-        start_row = start_row,
-        end_row = end_row,
-        original_lines = slice_lines(cur, start_row, end_row),
-    }
+    return table.concat(parts, '\n'),
+        {
+            path = path,
+            start_row = start_row,
+            end_row = end_row,
+            original_lines = slice_lines(cur, start_row, end_row),
+        }
 end
 
 --- Build the user turn for a prediction: a cursor note, the recent edits (seed +
