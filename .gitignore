@@ -9,3 +9,8 @@ nvim.log
 
 # local scratch / experiments
 /tmp/
+
+# high-volume live eval outputs; force-add specific snapshots when needed
+/experiments/duet-nes/logs/interdiff*/
+/experiments/duet-nes/logs/mercury_edit_*/
+/experiments/duet-nes/logs/nes_tableau_*.jsonl
