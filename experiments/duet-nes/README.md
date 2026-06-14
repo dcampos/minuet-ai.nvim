@@ -65,8 +65,9 @@ INCEPTION_API_KEY=... OPENROUTER_API_KEY=... \
     editable region; the plugin converts that region back to apply_patch so the
     existing preview/apply/disposition flow stays unchanged.
   - OpenRouter rejected `inception/mercury-edit-2` on `/chat/completions` as an
-    invalid model ID in the live probe, so the production provider uses direct
-    Inception (`INCEPTION_API_KEY`).
+    invalid model ID in the live probe; `/api/v1/models` currently lists
+    `inception/mercury-2` but not `inception/mercury-edit-2`, so the production
+    provider uses direct Inception (`INCEPTION_API_KEY`).
   - On the corrected Typst simplex-tableau eval, Mercury Edit was too selective:
     `M` returned no edit for 24/24 predictions (`MERCURY_EVAL_REPEATS=3`,
     `MERCURY_EVAL_STEPS=8`, run `mercury_edit_2026-06-14_05-32-05`). The same
