@@ -16,6 +16,7 @@ body=""
 
 python3 - "$body" <<'PY'
 import json
+import os
 import sys
 
 try:
@@ -37,6 +38,7 @@ if body.get("model") != "mercury-edit-2" or missing:
     print(json.dumps({"error": {"message": f"mock: bad Mercury Edit request, missing={missing}"}}))
     raise SystemExit(0)
 
+replacement = os.environ.get("MINUET_MOCK_INCEPTION_CONTENT", "return 42")
 print(json.dumps({
     "id": "editcmpl_mock",
     "object": "edit.completion",
@@ -45,7 +47,7 @@ print(json.dumps({
         "index": 0,
         "message": {
             "role": "assistant",
-            "content": "```\nreturn 42\n```",
+            "content": f"```\n{replacement}\n```",
         },
         "finish_reason": "stop",
     }],

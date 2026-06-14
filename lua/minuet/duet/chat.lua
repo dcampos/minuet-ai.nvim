@@ -90,6 +90,10 @@ local function request_inception_edit(opts, callback, ctx)
             local replacement = split_region(content)
             local patch = session.render_edit(region.original_lines, replacement, region.path, 0)
             if not patch then
+                if ctx.mode == 'manual' then
+                    callback { error = 'Mercury Edit returned no change for manual prediction' }
+                    return
+                end
                 callback {
                     message = { role = 'assistant', content = require('minuet').config.duet.session.no_edit_token },
                 }
