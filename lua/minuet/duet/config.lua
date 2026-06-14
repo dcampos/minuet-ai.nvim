@@ -331,11 +331,10 @@ local M = {
         capability_reminder_every = 5,
         max_attempts = 3,
         max_reads = 2,
-        -- Inter-diff memory: replay this session's earlier predictions (the model's
-        -- own patch + what the user did with it) as interleaved turns BEFORE the
-        -- full current file. Benchmarked to lift next-edit accuracy on multi-step
-        -- edits; see duet-nes-spec.md. Additive — never replaces the file.
-        prediction_memory = true,
+        -- Inter-diff memory: optionally replay this session's earlier predictions
+        -- (the model's own patch + what the user did with it) as interleaved turns
+        -- BEFORE the full current file. Additive — never replaces the file.
+        prediction_memory = false,
         prediction_memory_max = 8,
         memory_preamble = 'Your earlier next-edit predictions this session (oldest first), each '
             .. 'followed by what the user did with it:',

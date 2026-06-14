@@ -64,6 +64,10 @@ INCEPTION_API_KEY=... OPENROUTER_API_KEY=... \
   one-literal edits, the model sometimes inferred a whole row rewrite. The prompt
   now tells NES to match the user's edit granularity (one literal/token in means
   one literal/token out) without adding a table-specific parser.
+- Inter-diff prediction memory remains implemented but is default-off. The early
+  positive 24-sample read used a misleading pivot and was underpowered; on the
+  corrected pivot it did not beat baseline, so it is not part of the production
+  default.
 - Mercury Edit 2 integration details:
   - Direct Inception `/v1/edit/completions` works and returns a fenced rewritten
     editable region; the plugin converts that region back to apply_patch so the

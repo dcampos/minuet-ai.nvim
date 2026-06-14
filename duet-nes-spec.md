@@ -45,7 +45,7 @@ turn (rebuilt from session state):
 ```
 system : decisive NES system prompt  +  capability reminder  +  decline policy
          (decline policy: auto = may reply `*** No Edit`; manual = must emit an edit)
-memory : (prediction_memory, default on) preamble user turn, then per earlier
+memory : (prediction_memory, default off) preamble user turn, then per earlier
          prediction this session: assistant = the patch it proposed,
          user = the disposition ("The user accepted it." / "…did not use it." /
          "…dismissed it." / "…rejected it and asked for a different edit").
@@ -57,13 +57,12 @@ user   : 1 cursor note    ("Editor cursor: line L, column C; that line reads `�
 ```
 
 - **Inter-diff memory is ADDITIVE** — it precedes but never replaces the full
-  current file. Benchmarked on the duplicated-tableau pivot: replaying the model's
-  own prior guesses + accept/ignore dispositions lifted exact-next-cell hit rate
-  ~29% → ~42% at zero extra latency, while *replacing* the file with a diff log
-  (the model reconstructing state) regressed it. Re-feeding the model's reasoning
-  did not help (and the native `reasoning` field is dropped on history turns), so
-  only the facts (patch + disposition) are carried. Harnesses:
-  `experiments/duet-nes/scripts/nes_interdiff{,2,3}.lua`.
+  current file. The feature can replay the model's own prior guesses plus the
+  user's disposition (accepted / ignored / dismissed / rejected), but it is
+  **default off**: the original positive 24-sample read was underpowered and used
+  a misleading pivot; on the corrected pivot it did not beat baseline. Re-feeding
+  the model's reasoning did not help, so the optional memory carries only facts
+  (patch + disposition).
 
 - **Cursor is a separate note**, never an inline marker — an inline `<|cursor|>`
   is out-of-distribution for an apply_patch-trained model (it got copied into
@@ -209,7 +208,7 @@ session = {
   capability_reminder_every = 5     -- (defined; not yet used — reminder is every turn)
   max_attempts              = 3
   max_reads                 = 2     -- enforced
-  prediction_memory         = true  -- replay prior predictions + dispositions (interleaved)
+  prediction_memory         = false -- optional replay of prior predictions + dispositions
   prediction_memory_max     = 8     -- cap on replayed predictions; reset with the session
   auto_trigger              = false
   debounce_ms               = 150   -- auto-trigger only; manual + post-accept burst = no wait
