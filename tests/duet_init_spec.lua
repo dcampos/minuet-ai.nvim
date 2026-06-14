@@ -89,12 +89,7 @@ return {
     {
         name = 'duet dismiss clears the preview without changing the buffer',
         run = function()
-            helpers.setup_root_config {
-                duet = {
-                    preview = { cursor = '|' },
-                    session = { prediction_memory = true },
-                },
-            }
+            helpers.setup_root_config { duet = { preview = { cursor = '|' } } }
             local captured = install_chat_stub()
             local duet = helpers.reload 'minuet.duet'
             duet.setup()
