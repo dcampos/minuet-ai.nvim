@@ -121,10 +121,13 @@ current_file_path: ...
 
 Mercury returns the rewritten editable region in a Markdown fence. The transport
 converts that replacement back to a normal apply_patch hunk, so the existing
-preview/apply/disposition machinery stays unchanged. Endpoint probe result:
-direct Inception works; OpenRouter currently rejects `inception/mercury-edit-2`
-on `/chat/completions` as an invalid model ID, so this provider uses the direct
-Inception API (`INCEPTION_API_KEY`).
+preview/apply/disposition machinery stays unchanged. If Mercury returns the same
+editable region unchanged, auto mode treats it as `*** No Edit`; manual mode
+stops with a provider error instead of retrying the identical native prompt.
+Endpoint probe result: direct Inception works; OpenRouter currently rejects
+`inception/mercury-edit-2` on `/chat/completions` as an invalid model ID, and
+`/api/v1/models` lists `inception/mercury-2` but not `inception/mercury-edit-2`,
+so this provider uses the direct Inception API (`INCEPTION_API_KEY`).
 
 ## Output
 
