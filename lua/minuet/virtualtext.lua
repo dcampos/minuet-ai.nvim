@@ -460,6 +460,9 @@ end
 ---@field fetch_state_before? string before-cursor text where the current top-up budget started
 ---@field fetch_params? table params of the current top-up budget's state
 ---@field fetched_this_state? boolean whether a non-retry request already fired at the current top-up state
+---@field distinct_active? boolean a cycle-past-the-last fetch for a not-yet-seen completion is in flight
+---@field distinct_seen? table<string, true> completions already seen when the distinct fetch started
+---@field distinct_attempts? integer requests fired so far for the current distinct fetch
 
 -- Provider callbacks capture this token; a *hard* cleanup bumps it so in-flight
 -- callbacks cannot repaint ghost text after an explicit dismiss / insert-leave.
@@ -485,6 +488,9 @@ local function reset_ctx(ctx)
     ctx.fetch_state_before = nil
     ctx.fetch_params = nil
     ctx.fetched_this_state = nil
+    ctx.distinct_active = nil
+    ctx.distinct_seen = nil
+    ctx.distinct_attempts = nil
 end
 
 local function stop_timer()
@@ -537,8 +543,14 @@ local function update_preview(ctx)
 
     local annot = ''
 
-    if ctx.suggestions and #ctx.suggestions > 1 then
-        annot = '(' .. ctx.choice .. '/' .. #ctx.suggestions .. ')'
+    -- While a cycle-past-the-last fetch is in flight, show a loading indicator
+    -- inside the counter -- e.g. (2/2 ⋯) -- even for a lone suggestion, so the
+    -- user knows a fresh, distinct completion is being fetched.
+    local n_sug = ctx.suggestions and #ctx.suggestions or 0
+    if ctx.distinct_active and n_sug >= 1 then
+        annot = '(' .. ctx.choice .. '/' .. n_sug .. ' ⋯)'
+    elseif n_sug > 1 then
+        annot = '(' .. ctx.choice .. '/' .. n_sug .. ')'
     end
 
     local cursor_col = vim.fn.col '.'
@@ -690,7 +702,10 @@ local function trigger(bufnr, overrides, is_retry, is_manual)
     local soft_limit = (cfg.virtualtext or {}).cache_soft_chars_ahead or 20
     local cached, choice, n_fresh =
         derive_suggestions(ctx, params, cur_before, cur_after, context.opts.is_incomplete_before, cfg)
-    if #cached > 0 then
+    -- During a cycle-past-the-last distinct fetch we keep the user's current
+    -- view (the last suggestion + loading dots) on screen rather than snapping
+    -- back to the ranked top; the callback swaps in the new distinct completion.
+    if #cached > 0 and not ctx.distinct_active then
         ctx.suggestions = cached
         ctx.choice = choice
         ctx.shown_choices = ctx.shown_choices or {}
@@ -704,7 +719,9 @@ local function trigger(bufnr, overrides, is_retry, is_manual)
     -- within one state shares a single budget. Within a state, once a non-retry
     -- request has fired and the retry budget is spent we "move on" rather than
     -- re-hammering a position that refuses to yield distinct fresh completions.
-    if not is_retry then
+    -- A distinct fetch deliberately bypasses both gates: it must keep firing past
+    -- a full bucket to surface a not-yet-seen completion.
+    if not is_retry and not ctx.distinct_active then
         local drift = ctx.fetch_state_before ~= nil
             and vim.deep_equal(ctx.fetch_params, params)
             and prefix_typed_since(ctx.fetch_state_before, cur_before, context.opts.is_incomplete_before)
@@ -822,6 +839,44 @@ local function trigger(bufnr, overrides, is_retry, is_manual)
             ctx_now.opts.is_incomplete_before,
             cfg
         )
+
+        -- Cycle-past-the-last distinct fetch: keep the current view + dots until
+        -- a completion the user has not already seen lands, then cycle to it.
+        if ctx.distinct_active then
+            local picked
+            for i, comp in ipairs(effective) do
+                if not ctx.distinct_seen[comp] then
+                    picked = i
+                    break
+                end
+            end
+            if picked then
+                ctx.suggestions = effective
+                ctx.choice = picked
+                ctx.shown_choices = ctx.shown_choices or {}
+                ctx.distinct_active = nil
+                set_lock(
+                    ctx,
+                    params,
+                    effective[picked],
+                    ctx_now.lines_before,
+                    ctx_now.lines_after,
+                    ctx_now.opts.is_incomplete_before
+                )
+                update_preview(ctx)
+            elseif done ~= false then
+                ctx.distinct_attempts = (ctx.distinct_attempts or 0) + 1
+                if next(data) and ctx.distinct_attempts < max_retries then
+                    trigger(bufnr, overrides, true)
+                else
+                    -- Gave up: drop the dots, leave the user on the last entry.
+                    ctx.distinct_active = nil
+                    update_preview(ctx)
+                end
+            end
+            return
+        end
+
         if #effective > 0 then
             ctx.suggestions = effective
             ctx.choice = effective_choice
@@ -920,6 +975,27 @@ function action.fire(overrides)
     trigger(api.nvim_get_current_buf(), overrides, false, true)
 end
 
+--- Cycle-past-the-last fetch: the user pressed "next" on the last suggestion, so
+--- they have seen every current option and want a different one. Snapshot the
+--- seen set, show the loading dots, and fire requests (bypassing the bucket
+--- gates) until a not-yet-seen completion lands or the attempt budget runs out --
+--- never wrapping back to the first suggestion or to an empty display.
+---@param ctx minuet.VirtualtextSuggestionContext
+---@param overrides? table
+local function start_distinct_fetch(ctx, overrides)
+    if ctx.distinct_active then
+        return
+    end
+    ctx.distinct_seen = {}
+    for _, s in ipairs(ctx.suggestions or {}) do
+        ctx.distinct_seen[s] = true
+    end
+    ctx.distinct_active = true
+    ctx.distinct_attempts = 0
+    update_preview(ctx)
+    trigger(api.nvim_get_current_buf(), overrides, false, true)
+end
+
 ---@param overrides? table Optional config patch.
 ---Behavior:
 ---  * no suggestions yet → fire a trigger with overrides applied
@@ -928,7 +1004,9 @@ end
 ---    results with stop=\n and presses a keymap that overrides stop=\n\n)
 ---    → fire a fresh trigger so the user actually gets the variant they
 ---    asked for, rather than cycling within the wrong set
----  * suggestions visible and overrides match (or are absent) → cycle
+---  * cycling forward off the end of the list → fetch a new, distinct completion
+---    (loading dots) instead of wrapping back to the first
+---  * otherwise → cycle within the visible set
 local function cycle_or_fetch(direction, overrides)
     local ctx = get_ctx()
 
@@ -944,6 +1022,11 @@ local function cycle_or_fetch(direction, overrides)
             trigger(api.nvim_get_current_buf(), overrides, false, true)
             return
         end
+    end
+
+    if direction > 0 and ctx.choice and ctx.choice >= #ctx.suggestions then
+        start_distinct_fetch(ctx, overrides)
+        return
     end
 
     advance(direction, ctx)
@@ -1290,6 +1373,11 @@ function autocmd.on_cursor_moved_i()
     if ctx.in_accept then
         return
     end
+
+    -- Moving the cursor abandons any in-flight cycle-past-the-last fetch: the
+    -- state it was fetching for is no longer current, so drop the dots and let
+    -- the normal re-derive below take over.
+    ctx.distinct_active = nil
 
     -- Only serve cached completions when auto-trigger is on, or when the user
     -- explicitly fired a manual completion that is still "live" (not yet

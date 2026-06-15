@@ -1395,4 +1395,155 @@ return {
             helpers.delete_buffer(bufnr)
         end,
     },
+    {
+        -- Pressing "next" on the last suggestion fetches a not-yet-seen
+        -- completion instead of wrapping back to the first, and cycles to it.
+        name = 'virtualtext cycling past the last suggestion fetches a new distinct completion',
+        run = function()
+            helpers.setup_root_config {
+                provider = 'test',
+                debounce = 0,
+                throttle = 0,
+                n_completions = 1,
+                virtualtext = {
+                    debounce = 0,
+                    throttle = 0,
+                    max_retries = 3,
+                    auto_trigger_mode = 'full',
+                },
+                provider_options = {
+                    test = { model = 'fixture-model', optional = {} },
+                },
+            }
+
+            local real_utils = require 'minuet.utils'
+            local current = { lines_before = 'S', lines_after = '', opts = {} }
+            package.loaded['minuet.utils'] = setmetatable({
+                get_context = function()
+                    return current
+                end,
+            }, { __index = real_utils })
+
+            local backend_calls = 0
+            package.loaded['minuet.backends.test'] = {
+                complete = function(_, callback)
+                    backend_calls = backend_calls + 1
+                    if backend_calls == 1 then
+                        callback { 'AA' }
+                    else
+                        callback { 'BB' }
+                    end
+                end,
+            }
+
+            local virtualtext = helpers.reload 'minuet.virtualtext'
+            virtualtext.setup()
+
+            local bufnr = helpers.create_buffer({ 'x' }, { 1, 1 })
+            vim.b.minuet_virtual_text_auto_trigger_mode = 'full'
+            local original_mode = vim.fn.mode
+            vim.fn.mode = function()
+                return 'i'
+            end
+
+            virtualtext.action.fire()
+            helpers.expect_match(get_suggestion_text(bufnr, virtualtext.ns_id), '^AA')
+
+            -- At the last suggestion (1/1): fetch a new distinct completion.
+            virtualtext.action.next()
+            helpers.expect_match(
+                get_suggestion_text(bufnr, virtualtext.ns_id),
+                '^BB',
+                'cycles to the freshly fetched distinct completion'
+            )
+            helpers.expect_truthy(backend_calls >= 2, 'a distinct fetch fired at least one more request')
+
+            virtualtext.action.dismiss()
+            package.loaded['minuet.utils'] = real_utils
+            vim.fn.mode = original_mode
+            helpers.delete_buffer(bufnr)
+        end,
+    },
+    {
+        -- While the distinct fetch is in flight the loading dots show inside the
+        -- counter; they clear and the view cycles once a distinct completion
+        -- lands. If none ever differs, the dots clear and the last entry stays
+        -- (never wrapping to the first or to an empty display).
+        name = 'virtualtext distinct fetch shows loading dots and gives up onto the last entry',
+        run = function()
+            helpers.setup_root_config {
+                provider = 'test',
+                debounce = 0,
+                throttle = 0,
+                n_completions = 1,
+                virtualtext = {
+                    debounce = 0,
+                    throttle = 0,
+                    max_retries = 2,
+                    auto_trigger_mode = 'full',
+                },
+                provider_options = {
+                    test = { model = 'fixture-model', optional = {} },
+                },
+            }
+
+            local real_utils = require 'minuet.utils'
+            local current = { lines_before = 'S', lines_after = '', opts = {} }
+            package.loaded['minuet.utils'] = setmetatable({
+                get_context = function()
+                    return current
+                end,
+            }, { __index = real_utils })
+
+            local backend_calls = 0
+            local pending = {}
+            package.loaded['minuet.backends.test'] = {
+                complete = function(_, callback)
+                    backend_calls = backend_calls + 1
+                    if backend_calls == 1 then
+                        callback { 'AA' }
+                    else
+                        table.insert(pending, callback)
+                    end
+                end,
+            }
+
+            local virtualtext = helpers.reload 'minuet.virtualtext'
+            virtualtext.setup()
+
+            local bufnr = helpers.create_buffer({ 'x' }, { 1, 1 })
+            vim.b.minuet_virtual_text_auto_trigger_mode = 'full'
+            local original_mode = vim.fn.mode
+            vim.fn.mode = function()
+                return 'i'
+            end
+
+            virtualtext.action.fire()
+            helpers.expect_match(get_suggestion_text(bufnr, virtualtext.ns_id), '^AA')
+
+            -- next() at the last entry: a distinct request is in flight, dots show.
+            virtualtext.action.next()
+            helpers.expect_truthy(pending[1], 'a distinct request is in flight')
+            helpers.expect_truthy(
+                get_suggestion_text(bufnr, virtualtext.ns_id):find('⋯', 1, true),
+                'loading dots show while fetching'
+            )
+
+            -- The fetch keeps returning the already-seen completion: it retries up
+            -- to the budget, then gives up, dropping the dots onto the last entry.
+            while pending[1] do
+                local cb = table.remove(pending, 1)
+                cb { 'AA' }
+            end
+            local shown = get_suggestion_text(bufnr, virtualtext.ns_id)
+            helpers.expect_match(shown, '^AA', 'gives up onto the last entry, not an empty display')
+            helpers.expect_falsy(shown:find('⋯', 1, true), 'dots clear once the fetch gives up')
+            helpers.expect_truthy(backend_calls >= 3, 'the distinct fetch retried before giving up')
+
+            virtualtext.action.dismiss()
+            package.loaded['minuet.utils'] = real_utils
+            vim.fn.mode = original_mode
+            helpers.delete_buffer(bufnr)
+        end,
+    },
 }
