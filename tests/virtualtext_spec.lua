@@ -1166,4 +1166,233 @@ return {
             helpers.delete_buffer(bufnr)
         end,
     },
+    {
+        -- Soft band: a cached completion the cursor has drifted past the soft
+        -- limit (but not the hard one) is still shown, yet does not count as a
+        -- fresh completion, so a background top-up request keeps firing to refill
+        -- the n_completions bucket.
+        name = 'virtualtext soft band shows the completion but still fires a top-up',
+        run = function()
+            helpers.setup_root_config {
+                provider = 'test',
+                debounce = 0,
+                throttle = 0,
+                n_completions = 1,
+                virtualtext = {
+                    debounce = 0,
+                    throttle = 0,
+                    max_retries = 0,
+                    cache_soft_chars_ahead = 2,
+                    cache_max_chars_ahead = 20,
+                    auto_trigger_mode = 'full',
+                },
+                provider_options = {
+                    test = { model = 'fixture-model', optional = {} },
+                },
+            }
+
+            local real_utils = require 'minuet.utils'
+            local before = 'p'
+            package.loaded['minuet.utils'] = setmetatable({
+                get_context = function()
+                    return { lines_before = before, lines_after = '', opts = {} }
+                end,
+            }, { __index = real_utils })
+
+            local backend_calls = 0
+            package.loaded['minuet.backends.test'] = {
+                complete = function(_, callback)
+                    backend_calls = backend_calls + 1
+                    if backend_calls == 1 then
+                        callback { 'abcdefghij' }
+                    else
+                        callback {}
+                    end
+                end,
+            }
+
+            local virtualtext = helpers.reload 'minuet.virtualtext'
+            virtualtext.setup()
+
+            local bufnr = helpers.create_buffer({ 'p' }, { 1, 1 })
+            vim.b.minuet_virtual_text_auto_trigger_mode = 'full'
+            local original_mode = vim.fn.mode
+            vim.fn.mode = function()
+                return 'i'
+            end
+
+            -- Fresh at 'p': one completion satisfies n_completions, no top-up.
+            before = 'p'
+            virtualtext.action.fire()
+            helpers.expect_equal(backend_calls, 1)
+            helpers.expect_match(get_suggestion_text(bufnr, virtualtext.ns_id), '^abcdefghij')
+
+            -- Typed 'abc': drift 3 is past the soft limit (2) but within the hard
+            -- limit (20). The remainder still shows, but it no longer counts as
+            -- fresh, so a top-up request fires.
+            before = 'pabc'
+            vim.api.nvim_exec_autocmds('CursorMovedI', { buffer = bufnr })
+            helpers.expect_match(
+                get_suggestion_text(bufnr, virtualtext.ns_id),
+                '^defghij',
+                'soft-band completion stays shown'
+            )
+            helpers.expect_equal(backend_calls, 2, 'a soft-band state fires a background top-up')
+
+            virtualtext.action.dismiss()
+            vim.fn.mode = original_mode
+            helpers.delete_buffer(bufnr)
+        end,
+    },
+    {
+        -- Hard band: an unlocked sibling completion is hidden from the cycle list
+        -- once the cursor drifts past the hard limit, while the shown/locked one
+        -- stays visible (so accept_word / accept_line sliding never drops it). A
+        -- cursor that returns within the band re-shows the hidden sibling.
+        name = 'virtualtext hard band hides the unlocked sibling but keeps the locked one and re-shows on return',
+        run = function()
+            helpers.setup_root_config {
+                provider = 'test',
+                debounce = 0,
+                throttle = 0,
+                n_completions = 2,
+                virtualtext = {
+                    debounce = 0,
+                    throttle = 0,
+                    max_retries = 0,
+                    cache_soft_chars_ahead = 2,
+                    cache_max_chars_ahead = 4,
+                    auto_trigger_mode = 'full',
+                },
+                provider_options = {
+                    test = { model = 'fixture-model', optional = {} },
+                },
+            }
+
+            local real_utils = require 'minuet.utils'
+            local before = 'p'
+            package.loaded['minuet.utils'] = setmetatable({
+                get_context = function()
+                    return { lines_before = before, lines_after = '', opts = {} }
+                end,
+            }, { __index = real_utils })
+
+            local backend_calls = 0
+            package.loaded['minuet.backends.test'] = {
+                complete = function(_, callback)
+                    backend_calls = backend_calls + 1
+                    if backend_calls == 1 then
+                        callback { 'abcdefAAA', 'abcdefBBB' }
+                    else
+                        callback {}
+                    end
+                end,
+            }
+
+            local virtualtext = helpers.reload 'minuet.virtualtext'
+            virtualtext.setup()
+
+            local bufnr = helpers.create_buffer({ 'p' }, { 1, 1 })
+            vim.b.minuet_virtual_text_auto_trigger_mode = 'full'
+            local original_mode = vim.fn.mode
+            vim.fn.mode = function()
+                return 'i'
+            end
+
+            -- Two siblings at 'p'; the first is shown (and becomes the lock).
+            before = 'p'
+            virtualtext.action.fire()
+            helpers.expect_match(get_suggestion_text(bufnr, virtualtext.ns_id), '^abcdefAAA %(1/2%)')
+
+            -- Typed 5 chars (drift 5 > hard 4): the unlocked sibling drops out of
+            -- the list, but the locked one stays visible -- no (x/2) any more.
+            before = 'pabcde'
+            vim.api.nvim_exec_autocmds('CursorMovedI', { buffer = bufnr })
+            local shown = get_suggestion_text(bufnr, virtualtext.ns_id)
+            helpers.expect_match(shown, '^fAAA', 'the locked completion survives past the hard limit')
+            helpers.expect_falsy(shown:find('/2', 1, true), 'the unlocked sibling is hidden past the hard limit')
+
+            -- Backspace to drift 2 (fresh again): the hidden sibling returns.
+            before = 'pab'
+            vim.api.nvim_exec_autocmds('CursorMovedI', { buffer = bufnr })
+            helpers.expect_match(
+                get_suggestion_text(bufnr, virtualtext.ns_id),
+                '^cdefAAA %(1/2%)',
+                'a returning cursor re-shows the cached sibling'
+            )
+
+            virtualtext.action.dismiss()
+            vim.fn.mode = original_mode
+            helpers.delete_buffer(bufnr)
+        end,
+    },
+    {
+        -- With dismiss_drops_lock = false, dismiss is a temporary "get out of my
+        -- way" hide: the per-state lock survives, so re-triggering at the locked
+        -- state brings the cycled choice back instead of the natural ranking.
+        name = 'virtualtext dismiss_drops_lock=false keeps the cycled choice across a dismiss',
+        run = function()
+            helpers.setup_root_config {
+                provider = 'test',
+                debounce = 0,
+                throttle = 0,
+                n_completions = 2,
+                virtualtext = {
+                    debounce = 0,
+                    throttle = 0,
+                    max_retries = 0,
+                    auto_trigger_mode = 'full',
+                    dismiss_drops_lock = false,
+                },
+                provider_options = {
+                    test = { model = 'fixture-model', optional = {} },
+                },
+            }
+
+            local real_utils = require 'minuet.utils'
+            local current = { lines_before = 'S', lines_after = '', opts = {} }
+            package.loaded['minuet.utils'] = setmetatable({
+                get_context = function()
+                    return current
+                end,
+            }, { __index = real_utils })
+
+            package.loaded['minuet.backends.test'] = {
+                complete = function(_, callback)
+                    callback { 'AA', 'BB' }
+                end,
+            }
+
+            local virtualtext = helpers.reload 'minuet.virtualtext'
+            virtualtext.setup()
+
+            local bufnr = helpers.create_buffer({ 'x' }, { 1, 1 })
+            vim.b.minuet_virtual_text_auto_trigger_mode = 'full'
+            local original_mode = vim.fn.mode
+            vim.fn.mode = function()
+                return 'i'
+            end
+
+            virtualtext.action.fire()
+            virtualtext.action.next()
+            helpers.expect_match(get_suggestion_text(bufnr, virtualtext.ns_id), '^BB')
+
+            -- Dismiss hides the ghost text but keeps the lock.
+            virtualtext.action.dismiss()
+            helpers.expect_falsy(virtualtext.action.is_visible(), 'dismiss still hides the ghost text')
+
+            -- Re-trigger at the same state: the cycled BB returns, not ranked AA.
+            virtualtext.action.fire()
+            helpers.expect_match(
+                get_suggestion_text(bufnr, virtualtext.ns_id),
+                '^BB',
+                'the lock survives dismiss and re-shows the cycled choice'
+            )
+
+            virtualtext.action.dismiss()
+            package.loaded['minuet.utils'] = real_utils
+            vim.fn.mode = original_mode
+            helpers.delete_buffer(bufnr)
+        end,
+    },
 }

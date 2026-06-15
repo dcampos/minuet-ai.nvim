@@ -271,6 +271,29 @@ local M = {
         -- completion may never exist. Retries stop as soon as the pool reaches
         -- n_completions.
         max_retries = 6,
+        -- Context bands for reusing a cached completion as the cursor moves
+        -- forward. Because every request snaps its prefix to the same start
+        -- byte, a cached entry's prefix is always a prefix of the current
+        -- before-cursor text, and the difference (chars typed since that
+        -- request) measures how much *less* context the entry carries. Smaller
+        -- is fresher.
+        --   * <= cache_soft_chars_ahead: fresh -- counts toward the
+        --     n_completions bucket we try to keep filled.
+        --   * soft..hard: shown and cyclable, but does not count as fresh, so a
+        --     background top-up keeps firing to refill the bucket.
+        --   * > cache_max_chars_ahead: hidden from the (x/y) cycle list but kept
+        --     in cache (a returning cursor re-shows it), except the currently
+        --     shown/locked completion, which stays visible regardless so rapid
+        --     accept_word / accept_line sliding never drops it.
+        cache_soft_chars_ahead = 20,
+        cache_max_chars_ahead = 40,
+        -- Whether `dismiss` also drops the per-state lock (the completion the
+        -- user cycled to / had shown for a buffer state). When true (default),
+        -- dismiss is a clean reset: the next visit to that state shows the
+        -- naturally ranked completion. Set to false to treat dismiss as a
+        -- temporary "get out of my way" hide that keeps the lock, so re-enabling
+        -- or re-triggering at the same state brings the chosen completion back.
+        dismiss_drops_lock = true,
         -- Suffix (after-cursor) size control for FIM requests. The prefix grows
         -- and stays warm on the server's KV cache via the anchor, but the
         -- suffix is rarely cached (it shifts as the prefix grows), so every

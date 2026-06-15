@@ -216,20 +216,29 @@ end
 --- continuation, and a longer prefix is also probably warm on the server's KV
 --- cache). A cache entry contributes when provider/model, non-stop optional
 --- fields and stop tokens are all equal, and its prefix/suffix are content-
---- compatible with the current cursor (see prefix_compatible / suffix_compatible
---- -- no shift tolerance, no time component). Completions are shown verbatim
---- (the cursor sits exactly where they continue) and deduplicated, keeping the
---- longest matching prefix for ranking.
+--- compatible with the current cursor (see prefix_typed_since /
+--- suffix_compatible -- no shift tolerance, no time component).
+---
+--- Each entry's `typed_since` (how much less context it carries than the
+--- current cursor) places it in a band: entries past `hard_limit` are dropped
+--- from the cyclable list entirely (kept in cache for a returning cursor);
+--- those within the bands are shown with the already-typed head stripped. The
+--- second return is how many distinct results are *fresh* (typed_since <=
+--- soft_limit) -- the count callers compare against n_completions to decide
+--- whether to keep firing top-up requests.
 ---@param ctx minuet.VirtualtextSuggestionContext
 ---@param params table   output of extract_cache_params for the current request
 ---@param cur_before string  current lines_before
 ---@param cur_after string   current lines_after
 ---@param cur_incomplete_before boolean current window left-truncated?
----@return string[]
-local function pool_suggestions(ctx, params, cur_before, cur_after, cur_incomplete_before)
+---@param soft_limit integer fresh/soft boundary (chars of missing context)
+---@param hard_limit integer soft/hidden boundary
+---@return string[] results, integer n_fresh
+local function pool_suggestions(ctx, params, cur_before, cur_after, cur_incomplete_before, soft_limit, hard_limit)
     local results = {}
     local best_len = {} -- completion -> longest matching prefix length
     local order = {} -- completion -> first-seen index, for a stable tie-break
+    local min_drift = {} -- completion -> smallest typed_since seen (freshness)
 
     -- Normalise a stop-token list so nil and {} compare equal.
     local function norm_stops(t)
@@ -261,7 +270,9 @@ local function pool_suggestions(ctx, params, cur_before, cur_after, cur_incomple
             goto continue
         end
         local typed_since = prefix_typed_since(entry.lines_before, cur_before, cur_incomplete_before)
-        if typed_since == nil then
+        -- Past the hard limit the entry stays in cache (a returning cursor can
+        -- re-show it) but is hidden from the cyclable list.
+        if typed_since == nil or typed_since > hard_limit then
             goto continue
         end
         -- The user must have typed exactly the head of a completion for its
@@ -276,9 +287,15 @@ local function pool_suggestions(ctx, params, cur_before, cur_after, cur_incomple
                     if best_len[effective] == nil then
                         best_len[effective] = plen
                         order[effective] = #results + 1
+                        min_drift[effective] = typed_since
                         table.insert(results, effective)
-                    elseif plen > best_len[effective] then
-                        best_len[effective] = plen
+                    else
+                        if plen > best_len[effective] then
+                            best_len[effective] = plen
+                        end
+                        if typed_since < min_drift[effective] then
+                            min_drift[effective] = typed_since
+                        end
                     end
                 end
             end
@@ -294,65 +311,129 @@ local function pool_suggestions(ctx, params, cur_before, cur_after, cur_incomple
         return order[a] < order[b]
     end)
 
-    return results
+    local n_fresh = 0
+    for _, r in ipairs(results) do
+        if min_drift[r] <= soft_limit then
+            n_fresh = n_fresh + 1
+        end
+    end
+
+    return results, n_fresh
 end
 
---- The locked suggestion the user cycled to, re-derived for the current buffer
---- state: its untyped remainder after any text typed since it was pinned, or
---- nil when the lock no longer applies. Uses the same content-based
---- compatibility as a cache entry, so returning to -- or typing forward through
---- -- the locked state keeps the pinned choice resolvable.
+local MAX_LOCKS = 8
+
+--- The lock associated with the current buffer state, if any, plus its untyped
+--- remainder. Each lock records the completion shown for a state (set the first
+--- time something is shown there, updated when the user cycles). Locks are kept
+--- in a small ring so returning to an earlier state still resolves the choice
+--- the user left there. Uses the same content-based compatibility as a cache
+--- entry, so typing forward through -- or returning to -- a locked state keeps
+--- the choice resolvable. Most-recent lock wins when several are compatible.
 ---@param ctx minuet.VirtualtextSuggestionContext
+---@param params table   params of the request whose completions are showing
 ---@param cur_before string
 ---@param cur_after string
 ---@param cur_incomplete_before boolean
----@return string? remainder the locked completion stripped of typed-since text
-local function locked_remainder(ctx, cur_before, cur_after, cur_incomplete_before)
-    local lock = ctx.locked
-    if lock == nil or not suffix_compatible(lock.lines_after, cur_after) then
-        return nil
+---@return table? lock, string? remainder the lock stripped of typed-since text
+local function compatible_lock(ctx, params, cur_before, cur_after, cur_incomplete_before)
+    local locks = ctx.locks or {}
+    for i = #locks, 1, -1 do
+        local lock = locks[i]
+        -- A lock only applies to its own completion family: a choice cycled
+        -- under stop='\n' must not pin over a stop='\n\n' set, etc.
+        if vim.deep_equal(lock.params, params) and suffix_compatible(lock.lines_after, cur_after) then
+            local typed_since = prefix_typed_since(lock.lines_before, cur_before, cur_incomplete_before)
+            if typed_since ~= nil
+                and lock.completion:sub(1, typed_since) == cur_before:sub(#cur_before - typed_since + 1)
+            then
+                return lock, lock.completion:sub(typed_since + 1)
+            end
+        end
     end
-    local typed_since = prefix_typed_since(lock.lines_before, cur_before, cur_incomplete_before)
-    if typed_since == nil then
-        return nil
+    return nil, nil
+end
+
+--- Record `completion` as the lock for the current state, replacing the lock
+--- already compatible with this state (e.g. the cycle target supersedes the
+--- auto-set first-shown one) or pushing a new ring entry otherwise.
+---@param ctx minuet.VirtualtextSuggestionContext
+---@param params table
+---@param completion string
+---@param cur_before string
+---@param cur_after string
+---@param cur_incomplete_before boolean
+local function set_lock(ctx, params, completion, cur_before, cur_after, cur_incomplete_before)
+    local lock = compatible_lock(ctx, params, cur_before, cur_after, cur_incomplete_before)
+    if lock then
+        lock.completion = completion
+        lock.lines_before = cur_before
+        lock.lines_after = cur_after
+    else
+        ctx.locks = ctx.locks or {}
+        table.insert(
+            ctx.locks,
+            { completion = completion, params = params, lines_before = cur_before, lines_after = cur_after }
+        )
+        while #ctx.locks > MAX_LOCKS do
+            table.remove(ctx.locks, 1)
+        end
     end
-    if lock.completion:sub(1, typed_since) ~= cur_before:sub(#cur_before - typed_since + 1) then
-        return nil
-    end
-    return lock.completion:sub(typed_since + 1)
 end
 
 --- Build the display list for the current state and pick the active index.
---- The locked completion -- the one the user explicitly cycled to -- stays #1
---- for as long as its state remains compatible, so leaving and returning to
---- that state re-shows it. Otherwise the natural ranking (longest prefix first)
---- decides. The lock itself is only changed by cycling or cleared by dismiss.
+--- The locked completion -- the one associated with this buffer state, set the
+--- first time something is shown and updated when the user cycles -- stays the
+--- displayed choice for as long as its state remains compatible, so leaving and
+--- returning to that state re-shows it. It also overrides the hard band: a
+--- locked completion the user has slid/typed past the hard limit is kept in the
+--- list (appended) so it stays visible, where an unlocked one would be hidden.
+--- Otherwise the natural ranking (longest prefix / most context first) decides,
+--- and the top result becomes the new lock for this state.
 --- Records the current state on ctx so a later cycle can re-lock against it.
 ---@param ctx minuet.VirtualtextSuggestionContext
 ---@param params table
 ---@param cur_before string
 ---@param cur_after string
 ---@param cur_incomplete_before boolean
----@return string[] results, integer choice
-local function derive_suggestions(ctx, params, cur_before, cur_after, cur_incomplete_before)
-    local results = pool_suggestions(ctx, params, cur_before, cur_after, cur_incomplete_before)
+---@param cfg table effective config (for the context bands and defaults)
+---@return string[] results, integer choice, integer n_fresh
+local function derive_suggestions(ctx, params, cur_before, cur_after, cur_incomplete_before, cfg)
+    local vt = cfg.virtualtext or {}
+    local soft_limit = vt.cache_soft_chars_ahead or 20
+    local hard_limit = vt.cache_max_chars_ahead or 40
+    local results, n_fresh =
+        pool_suggestions(ctx, params, cur_before, cur_after, cur_incomplete_before, soft_limit, hard_limit)
 
     ctx.cur_before = cur_before
     ctx.cur_after = cur_after
     ctx.cur_incomplete_before = cur_incomplete_before
 
     local choice = 1
-    local pinned = locked_remainder(ctx, cur_before, cur_after, cur_incomplete_before)
+    local _, pinned = compatible_lock(ctx, params, cur_before, cur_after, cur_incomplete_before)
     if pinned ~= nil then
+        local found
         for i, comp in ipairs(results) do
             if comp == pinned then
-                choice = i
+                found = i
                 break
             end
         end
+        if found then
+            choice = found
+        else
+            -- Locked completion is past the hard band (or otherwise unpooled):
+            -- keep it visible regardless, appended after the fresher options.
+            table.insert(results, pinned)
+            choice = #results
+        end
+    elseif #results > 0 then
+        -- New state with nothing locked yet: the most-context result becomes
+        -- this state's lock (so sliding/typing through it keeps it visible).
+        set_lock(ctx, params, results[1], cur_before, cur_after, cur_incomplete_before)
     end
 
-    return results, choice
+    return results, choice, n_fresh
 end
 
 ---@class minuet.CacheEntry
@@ -372,10 +453,13 @@ end
 ---@field n_retries? integer
 ---@field request_generation? integer
 ---@field in_accept? boolean set around a synchronous accept edit
----@field locked? { completion: string, lines_before: string, lines_after: string } user-cycled choice pinned #1 for its state
+---@field locks? { completion: string, params: table, lines_before: string, lines_after: string }[] per-state lock ring
 ---@field cur_before? string before-cursor text of the most recent derive
 ---@field cur_after? string after-cursor text of the most recent derive
 ---@field cur_incomplete_before? boolean whether cur_before was left-truncated
+---@field fetch_state_before? string before-cursor text where the current top-up budget started
+---@field fetch_params? table params of the current top-up budget's state
+---@field fetched_this_state? boolean whether a non-retry request already fired at the current top-up state
 
 -- Provider callbacks capture this token; a *hard* cleanup bumps it so in-flight
 -- callbacks cannot repaint ghost text after an explicit dismiss / insert-leave.
@@ -398,6 +482,9 @@ local function reset_ctx(ctx)
     ctx.choice = nil
     ctx.shown_choices = nil
     ctx.n_retries = nil
+    ctx.fetch_state_before = nil
+    ctx.fetch_params = nil
+    ctx.fetched_this_state = nil
 end
 
 local function stop_timer()
@@ -530,7 +617,6 @@ local function trigger(bufnr, overrides, is_retry, is_manual)
     local ctx = get_ctx(bufnr)
 
     if not is_retry then
-        ctx.n_retries = 0
         ctx.last_trigger_was_manual = is_manual or false
     end
     ctx.cache = ctx.cache or {}
@@ -597,17 +683,50 @@ local function trigger(bufnr, overrides, is_retry, is_manual)
     ctx.last_trigger_params = params
 
     -- Show any already-cached suggestions immediately while the request is in
-    -- flight; also skip firing if the cache already satisfies n_completions.
+    -- flight (never block display on the request, even when a fresher / more
+    -- context-rich response could still arrive).
     local n_completions = cfg.n_completions or 3
-    local cached, choice = derive_suggestions(ctx, params, cur_before, cur_after, context.opts.is_incomplete_before)
+    local max_retries = (cfg.virtualtext or {}).max_retries or 6
+    local soft_limit = (cfg.virtualtext or {}).cache_soft_chars_ahead or 20
+    local cached, choice, n_fresh =
+        derive_suggestions(ctx, params, cur_before, cur_after, context.opts.is_incomplete_before, cfg)
     if #cached > 0 then
         ctx.suggestions = cached
         ctx.choice = choice
         ctx.shown_choices = ctx.shown_choices or {}
         update_preview(ctx)
-        if not is_retry and #cached >= n_completions then
+    end
+
+    -- Per-state top-up budget. The goal is n_completions *fresh* completions
+    -- (those with near-full context) for the current buffer state. We start a
+    -- fresh budget only when the cursor has moved to a genuinely new state -- the
+    -- prefix drifted past the soft band, or the params changed -- so that typing
+    -- within one state shares a single budget. Within a state, once a non-retry
+    -- request has fired and the retry budget is spent we "move on" rather than
+    -- re-hammering a position that refuses to yield distinct fresh completions.
+    if not is_retry then
+        local drift = ctx.fetch_state_before ~= nil
+            and vim.deep_equal(ctx.fetch_params, params)
+            and prefix_typed_since(ctx.fetch_state_before, cur_before, context.opts.is_incomplete_before)
+        if drift == nil or drift == false or drift > soft_limit then
+            ctx.fetch_state_before = cur_before
+            ctx.fetch_params = params
+            ctx.n_retries = 0
+            ctx.fetched_this_state = false
+        end
+        -- Satisfied: enough fresh completions already cached.
+        if n_fresh >= n_completions then
             return
         end
+        -- Moved on: we already have at least one fresh completion to show, have
+        -- spent the whole retry budget at this state-family, and have not moved
+        -- to a new position -- so stop re-hammering a spot that will not yield
+        -- another distinct fresh completion. When n_fresh is 0 we always keep
+        -- trying: the user has nothing yet, and a new keystroke is a new chance.
+        if not is_manual and n_fresh >= 1 and ctx.fetched_this_state and (ctx.n_retries or 0) >= max_retries then
+            return
+        end
+        ctx.fetched_this_state = true
     end
 
     -- Record a snap point only when we actually re-anchored (the chosen window
@@ -695,8 +814,14 @@ local function trigger(bufnr, overrides, is_retry, is_manual)
         -- user typed ahead while the request was in flight.
         local cmp_ctx_now = utils.make_cmp_context()
         local ctx_now = utils.get_context(cmp_ctx_now, cfg)
-        local effective, effective_choice =
-            derive_suggestions(ctx, params, ctx_now.lines_before, ctx_now.lines_after, ctx_now.opts.is_incomplete_before)
+        local effective, effective_choice, n_fresh_now = derive_suggestions(
+            ctx,
+            params,
+            ctx_now.lines_before,
+            ctx_now.lines_after,
+            ctx_now.opts.is_incomplete_before,
+            cfg
+        )
         if #effective > 0 then
             ctx.suggestions = effective
             ctx.choice = effective_choice
@@ -704,11 +829,14 @@ local function trigger(bufnr, overrides, is_retry, is_manual)
             update_preview(ctx)
         end
 
+        -- Keep retrying until the state holds n_completions *fresh* completions
+        -- or the per-state budget runs out (the "move on" case). Soft / hard
+        -- entries are shown but do not count, so a position that only yields one
+        -- distinct completion stops after max_retries instead of looping.
         if done ~= false then
-            local max_retries = cfg.virtualtext.max_retries or 3
             local n_retries = ctx.n_retries or 0
             if next(data)
-                and #(ctx.suggestions or {}) < n_completions
+                and n_fresh_now < n_completions
                 and n_retries < max_retries
             then
                 ctx.n_retries = n_retries + 1
@@ -728,16 +856,12 @@ local function advance(count, ctx)
         ctx.choice = #ctx.suggestions
     end
 
-    -- Cycling pins the chosen completion as #1 for this buffer state: returning
-    -- to the state re-shows it (over the natural longest-prefix ranking) until
-    -- the user cycles again or dismisses.
+    -- Cycling re-locks this buffer state to the chosen completion: returning to
+    -- the state re-shows it (over the natural most-context ranking) until the
+    -- user cycles again or dismisses.
     local chosen = ctx.suggestions[ctx.choice]
-    if chosen and ctx.cur_before then
-        ctx.locked = {
-            completion = chosen,
-            lines_before = ctx.cur_before,
-            lines_after = ctx.cur_after,
-        }
+    if chosen and ctx.cur_before and ctx.last_trigger_params then
+        set_lock(ctx, ctx.last_trigger_params, chosen, ctx.cur_before, ctx.cur_after, ctx.cur_incomplete_before)
     end
 
     update_preview(ctx)
@@ -1068,9 +1192,13 @@ end
 
 function action.dismiss()
     local ctx = get_ctx()
-    -- An explicit dismiss also drops the cycle lock; the user does not want the
-    -- pinned choice resurrected on the next visit to that state.
-    ctx.locked = nil
+    -- By default an explicit dismiss also drops the state locks (a clean reset).
+    -- With dismiss_drops_lock = false the user treats dismiss as a temporary
+    -- "get out of my way" hide, so the locks survive and re-triggering at a
+    -- locked state brings the chosen completion back.
+    if (require('minuet').config.virtualtext or {}).dismiss_drops_lock ~= false then
+        ctx.locks = nil
+    end
     cleanup(ctx)
 end
 
@@ -1176,19 +1304,28 @@ function autocmd.on_cursor_moved_i()
     if can_show_cache and ctx.last_trigger_params then
         local cfg = require('minuet').config
         local context = utils.get_context(utils.make_cmp_context(), cfg)
-        local effective, choice = derive_suggestions(
+        local effective, choice, n_fresh = derive_suggestions(
             ctx,
             ctx.last_trigger_params,
             context.lines_before,
             context.lines_after,
-            context.opts.is_incomplete_before
+            context.opts.is_incomplete_before,
+            cfg
         )
         if #effective > 0 then
             ctx.suggestions = effective
             ctx.choice = choice
             ctx.shown_choices = ctx.shown_choices or {}
             update_preview(ctx)
-            stop_timer()
+            -- Soft invalidation: keep the cached suggestions on screen but, if we
+            -- are short of n_completions fresh ones, kick a background top-up.
+            -- trigger() applies the per-state budget, so this stops re-firing
+            -- once the state has been exhausted ("move on").
+            if n_fresh < (cfg.n_completions or 3) and should_auto_trigger() then
+                schedule()
+            else
+                stop_timer()
+            end
             return
         end
     end
