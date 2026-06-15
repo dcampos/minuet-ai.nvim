@@ -406,24 +406,57 @@ function M.get_context(cmp_context, cfg, anchor)
     local prefix_would_slide = n_chars_before + n_chars_after > config.context_window
         and n_chars_before >= config.context_window * config.context_ratio
 
-    -- Try anchor reuse. Both prefix AND suffix anchors must match: SPM-style
-    -- KV reuse needs every token before MID to be at the same position with
-    -- the same content. Mismatch on either side means we'd lose cache from
-    -- the mismatch onwards, so we may as well re-anchor cleanly.
-    if prefix_would_slide and anchor and anchor.prev_lines_before and anchor.prev_lines_after then
+    -- Try anchor reuse. The prefix anchor pins the start of the prompt prefix
+    -- to the same buffer-content boundary as a previous request; while the
+    -- user types forward it stays put and the prefix just grows at the cursor
+    -- edge, keeping the leading tokens byte-identical so the server's KV cache
+    -- stays warm.
+    --
+    -- Two tiers:
+    --   * Full anchor (prefix AND suffix match) -- the steady-typing case. The
+    --     suffix after the cursor is unchanged, so every token before MID is at
+    --     the same position with the same content: ideal for SPM models too.
+    --   * Prefix-only snap (prefix matches, suffix changed) -- the jump / edit-
+    --     below-cursor case. The user moved forward (e.g. a paragraph down) or
+    --     edited text after the cursor, so the old suffix is stale and must NOT
+    --     be reused; but the prefix above the cursor is still byte-identical
+    --     and its KV is probably still warm from when we were last here. We
+    --     reuse that warm prefix start and send a fresh, budget-truncated
+    --     suffix. For prefix-first (PSM) prompts this still hits cache on the
+    --     whole prefix; for SPM it gains nothing but never hurts correctness,
+    --     since the window we send is always a valid prefix/suffix of the live
+    --     buffer.
+    if prefix_would_slide and anchor and anchor.prev_lines_before then
         local pre = extend_prefix_anchor(raw_before, anchor.prev_lines_before, growth_slack)
-        local suf = pin_suffix_anchor(raw_after, anchor.prev_lines_after)
-        if pre and suf then
+        if pre then
+            local suf = anchor.prev_lines_after and pin_suffix_anchor(raw_after, anchor.prev_lines_after)
+            if suf then
+                return {
+                    lines_before = pre,
+                    lines_after = suf,
+                    opts = {
+                        -- Same window the previous request opened, just grown
+                        -- at the cursor edge. No truncation this turn.
+                        is_incomplete_before = false,
+                        is_incomplete_after = false,
+                        anchored = true,
+                    },
+                }
+            end
+
+            -- Prefix-only snap: keep the warm prefix start, but the suffix is
+            -- stale, so cut a fresh suffix from the live buffer sized to the
+            -- normal after-cursor budget.
+            local suffix_budget = math.floor(config.context_window * (1 - config.context_ratio))
+            local fresh_after = vim.fn.strcharpart(raw_after, 0, suffix_budget)
             return {
                 lines_before = pre,
-                lines_after = suf,
+                lines_after = fresh_after,
                 opts = {
-                    -- An anchor-reused context is, by construction, the same
-                    -- window the previous request opened (just grown at the
-                    -- cursor edge). Truncation didn't happen this turn.
                     is_incomplete_before = false,
-                    is_incomplete_after = false,
+                    is_incomplete_after = n_chars_after > suffix_budget,
                     anchored = true,
+                    suffix_fresh = true,
                 },
             }
         end

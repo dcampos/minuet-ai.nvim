@@ -136,7 +136,7 @@ return {
     },
 
     {
-        name = 'utils.get_context re-anchors when the suffix content changes',
+        name = 'utils.get_context prefix-only snaps when only the suffix changed',
         run = function()
             local bufnr, utils = setup_long_buffer(200, 200, {
                 config = {
@@ -149,12 +149,12 @@ return {
             local prev_before = baseline.lines_before
             local prev_after = baseline.lines_after
 
-            -- Type a few chars at the cursor (would normally be anchor-OK)…
+            -- Type a few chars at the cursor (prefix grows, still anchor-OK)…
             local row, col = unpack(vim.api.nvim_win_get_cursor(0))
             vim.api.nvim_buf_set_text(bufnr, row - 1, col, row - 1, col, { 'GROW' })
             vim.api.nvim_win_set_cursor(0, { row, col + 4 })
-            -- …but ALSO mutate text well after the cursor so the pinned
-            -- suffix no longer matches the buffer.
+            -- …but ALSO mutate text well after the cursor so the pinned suffix
+            -- no longer matches the buffer (an edit below / a jump downward).
             local last_line = vim.api.nvim_buf_line_count(bufnr) - 1
             vim.api.nvim_buf_set_lines(bufnr, last_line, last_line + 1, false, { 'TOTALLY DIFFERENT SUFFIX' })
 
@@ -166,9 +166,59 @@ return {
 
             local context = utils.get_context(utils.make_cmp_context(), nil, anchor)
 
+            -- The warm prefix start is still reused (its KV is unaffected by an
+            -- edit below the cursor), but the stale suffix is dropped for a
+            -- fresh one cut from the live buffer.
+            helpers.expect_truthy(context.opts.anchored, 'prefix is still warm, so we anchor')
+            helpers.expect_truthy(context.opts.suffix_fresh, 'suffix was rebuilt fresh')
+            helpers.expect_equal(
+                context.lines_before:sub(1, #prev_before),
+                prev_before,
+                'reused prefix keeps the anchored start'
+            )
             helpers.expect_falsy(
-                context.opts.anchored,
-                'suffix change should force re-anchor; both anchors must match for reuse'
+                context.lines_after == prev_after,
+                'stale suffix must not be reused after a change below the cursor'
+            )
+
+            helpers.delete_buffer(bufnr)
+        end,
+    },
+
+    {
+        name = 'utils.get_context snaps back to a warm prefix after a forward jump',
+        run = function()
+            -- Long single-block buffer so the cursor sits deep enough that the
+            -- prefix is truncated (anchor engages). 600 before / 600 after with
+            -- a 200 window keeps both sides over budget.
+            local bufnr, utils = setup_long_buffer(600, 600, {
+                config = {
+                    context_window = 200,
+                    context_ratio = 0.5,
+                },
+            })
+
+            local baseline = utils.get_context(utils.make_cmp_context())
+            local anchor = {
+                prev_lines_before = baseline.lines_before,
+                prev_lines_after = baseline.lines_after,
+                growth_slack = 12000,
+            }
+
+            -- Jump the cursor forward into the next line (a paragraph-down style
+            -- move): the prefix above is unchanged content, but the cursor now
+            -- sits inside the old suffix region, so the pinned suffix no longer
+            -- matches and must be rebuilt fresh.
+            local prev_after = anchor.prev_lines_after
+            vim.api.nvim_win_set_cursor(0, { 2, 100 })
+
+            local context = utils.get_context(utils.make_cmp_context(), nil, anchor)
+
+            helpers.expect_truthy(context.opts.anchored, 'forward jump still reuses the warm prefix')
+            helpers.expect_truthy(context.opts.suffix_fresh, 'fresh suffix at the new cursor')
+            helpers.expect_falsy(
+                context.lines_after == prev_after,
+                'the stale pre-jump suffix is not reused'
             )
 
             helpers.delete_buffer(bufnr)
