@@ -312,6 +312,103 @@ return {
         end,
     },
     {
+        name = 'openai FIM backend paints request #1 immediately without waiting on the grace or #2',
+        run = function()
+            local root = helpers.setup_root_config {
+                n_completions = 2,
+                request_timeout = 1,
+                curl_extra_args = {},
+                fim_filter_context = false,
+                -- A huge grace: if we wrongly waited, the paint would not happen.
+                first_request_grace_ms = 100000,
+            }
+
+            local base = helpers.reload 'minuet.backends.openai_base'
+            local common = require 'minuet.backends.common'
+            local utils = require 'minuet.utils'
+
+            local saved = {
+                make_tmp_file = utils.make_tmp_file,
+                make_curl_args = utils.make_curl_args,
+                stream_decode = utils.stream_decode,
+                start_job = common.start_job,
+                terminate = common.terminate_all_jobs,
+            }
+            local function restore()
+                utils.make_tmp_file = saved.make_tmp_file
+                utils.make_curl_args = saved.make_curl_args
+                utils.stream_decode = saved.stream_decode
+                common.start_job = saved.start_job
+                common.terminate_all_jobs = saved.terminate
+            end
+
+            local ok, err = pcall(function()
+                local n = 0
+                utils.make_tmp_file = function()
+                    n = n + 1
+                    return '/tmp/fim-' .. n
+                end
+                utils.make_curl_args = function(_, _, data_file)
+                    return { '-d', '@' .. data_file }
+                end
+                utils.stream_decode = function(_, data_file)
+                    return 'comp-' .. data_file:match '(%d+)'
+                end
+                common.terminate_all_jobs = function() end
+                local jobs = {}
+                common.start_job = function(_, _, handlers)
+                    table.insert(jobs, handlers)
+                    return { pid = #jobs }
+                end
+
+                local options = {
+                    name = 'Codestral',
+                    model = 'codestral-latest',
+                    end_point = 'https://example.test/v1/fim/completions',
+                    api_key = function()
+                        return 'test-key'
+                    end,
+                    stream = true,
+                    optional = {},
+                    transform = {},
+                    template = {
+                        prompt = function(before)
+                            return before
+                        end,
+                        suffix = function(_, after)
+                            return after
+                        end,
+                    },
+                }
+                local get_text_fn = function(json)
+                    return json.choices[1].delta.content
+                end
+
+                local callbacks = {}
+                base.complete_openai_fim_base(options, get_text_fn, {
+                    lines_before = 'x',
+                    lines_after = 'y',
+                    opts = {},
+                }, function(items, done)
+                    table.insert(callbacks, { items = items, done = done })
+                end, root.config)
+
+                -- Request #1 settles first: painted synchronously, right now,
+                -- without waiting for the grace or for request #2.
+                jobs[1].on_exit({ pid = 1 }, { code = 0, stdout = '' })
+                helpers.expect_equal(#callbacks, 1, 'request #1 paints immediately, no grace wait')
+                helpers.expect_equal(callbacks[1].items[1], 'comp-1')
+                helpers.expect_equal(callbacks[1].done, false, 'not done yet -- #2 is still in flight')
+            end)
+
+            restore()
+
+            if not ok then
+                error(err, 0)
+            end
+        end,
+    },
+    {
         name = 'openai FIM backend paints a later request after the grace, then #1 jumps to the front',
         run = function()
             local root = helpers.setup_root_config {
