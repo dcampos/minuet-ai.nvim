@@ -263,9 +263,14 @@ local M = {
         -- anchor looks back through these (newest first) for a still-valid
         -- prefix to snap back to, instead of paying for a cold re-anchor.
         max_anchors = 8,
-        -- Maximum automatic retry requests fired per trigger session when the
-        -- pool yields fewer than n_completions effective suggestions.
-        max_retries = 3,
+        -- Maximum automatic retry triggers fired per session when the pool
+        -- yields fewer than n_completions effective suggestions. Each retry
+        -- re-fires up to n_completions requests in the background (it does not
+        -- block the already-shown suggestion), so a higher cap mostly costs
+        -- extra requests at low-entropy positions where a distinct second
+        -- completion may never exist. Retries stop as soon as the pool reaches
+        -- n_completions.
+        max_retries = 6,
         -- Suffix (after-cursor) size control for FIM requests. The prefix grows
         -- and stays warm on the server's KV cache via the anchor, but the
         -- suffix is rarely cached (it shifts as the prefix grows), so every
