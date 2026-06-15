@@ -228,6 +228,7 @@ local function minuet_complete(arglead, cmdline, _)
             completion = { enable_auto_trigger = true, disable_auto_trigger = true },
             inline_completion = { enable_auto_trigger = true, disable_auto_trigger = true },
         },
+        stats = true,
         change_model = complete_change_model_options,
         change_provider = function()
             local providers = {}
@@ -336,6 +337,8 @@ vim.api.nvim_create_user_command('Minuet', function(args)
         M.change_model(fargs[2])
     elseif command == 'change_preset' then
         M.change_preset(fargs[2])
+    elseif command == 'stats' then
+        require('minuet.stats').show()
     else
         local action_group = actions[command]
         if not action_group then

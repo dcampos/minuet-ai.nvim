@@ -2,6 +2,7 @@ local M = {}
 local common = require 'minuet.backends.common'
 local utils = require 'minuet.utils'
 local log = require 'minuet.log'
+local stats = require 'minuet.stats'
 
 function M.openai_get_text_fn_no_stream(json)
     return json.choices[1].message.content
@@ -265,6 +266,7 @@ function M.complete_openai_fim_base(options, get_text_fn, context, callback, cfg
         local new_job = common.start_job(config.curl_cmd, args, {
             ---@param out vim.SystemCompleted
             on_exit = function(_, out)
+                local elapsed_ms = (vim.uv.hrtime() - started) / 1e6
                 log.record {
                     kind = 'fim',
                     provider = provider_name,
@@ -278,6 +280,13 @@ function M.complete_openai_fim_base(options, get_text_fn, context, callback, cfg
                     started = started,
                     request_idx = idx,
                     n_requests = n_completions,
+                }
+                -- Live in-memory token/cache accounting for :Minuet stats.
+                stats.record {
+                    name = options.name,
+                    model = options.model,
+                    response = out.stdout,
+                    elapsed_ms = elapsed_ms,
                 }
 
                 utils.run_event('MinuetRequestFinished', {

@@ -84,6 +84,14 @@ local function extract_usage(response)
     return usage
 end
 
+--- Public wrapper around the usage extractor so other modules (e.g. the stats
+--- dashboard) can pull token/cache accounting out of a raw response.
+---@param response string?
+---@return table? usage
+function M.extract_usage(response)
+    return extract_usage(response)
+end
+
 ---@return boolean
 function M.enabled()
     return resolve_path() ~= nil
