@@ -278,14 +278,6 @@ local M = {
         --               sub-linear curve (e.g. sqrt) so the suffix grows fast
         --               at first then levels off at a small cap.
         context_after_chars = nil,
-        -- A cache entry is skipped when the cursor has advanced more than this
-        -- many characters past it. Keeps the prefix-shift scan bounded and
-        -- prevents stale completions from showing up after significant typing.
-        cache_max_chars_ahead = 40,
-        -- When the cursor has advanced past this many characters (but still
-        -- within cache_max_chars_ahead), the cached completion is shown but a
-        -- background re-fetch is also fired.
-        cache_soft_chars_ahead = 20,
         -- Context anchor reuse: how many chars of new typing the request
         -- prefix is allowed to grow past the anchored prefix start before we
         -- re-anchor ("snap"). The anchor pins the start of the prompt prefix:

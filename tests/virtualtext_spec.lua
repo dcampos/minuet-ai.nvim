@@ -241,13 +241,17 @@ return {
         end,
     },
     {
-        name = 'virtualtext.action.fire reuses cached suggestions across truncated cursor context shifts',
+        -- Content-based cache (no shift): the same state re-shows from cache
+        -- verbatim, but a typed-ahead state (cursor advanced past the cached
+        -- position) is no longer "shifted" into a partial match -- it misses
+        -- and refetches.
+        name = 'virtualtext content cache re-shows the same state and refetches a shifted one',
         run = function()
             helpers.setup_root_config {
                 provider = 'test',
                 debounce = 0,
                 throttle = 0,
-                n_completions = 2,
+                n_completions = 1,
                 virtualtext = {
                     debounce = 0,
                     throttle = 0,
@@ -262,41 +266,18 @@ return {
             }
 
             local real_utils = require 'minuet.utils'
-            local context_index = 0
-            local contexts = {
-                {
-                    lines_before = 'abc',
-                    lines_after = 'xyz',
-                    opts = {},
-                },
-                {
-                    lines_before = 'bcq',
-                    lines_after = 'xy',
-                    opts = {},
-                },
-            }
-
+            local current = { lines_before = 'abc', lines_after = 'xyz', opts = {} }
             package.loaded['minuet.utils'] = setmetatable({
                 get_context = function()
-                    context_index = context_index + 1
-                    if context_index <= 2 then
-                        return contexts[1]
-                    end
-                    return contexts[2]
+                    return current
                 end,
             }, { __index = real_utils })
 
             local backend_calls = 0
-            local pending_callback
-
             package.loaded['minuet.backends.test'] = {
                 complete = function(_, callback)
                     backend_calls = backend_calls + 1
-                    if backend_calls == 1 then
-                        callback { 'qhello' }
-                    else
-                        pending_callback = callback
-                    end
+                    callback { 'qhello' }
                 end,
             }
 
@@ -309,20 +290,101 @@ return {
                 return 'i'
             end
 
+            -- First request at state 'abc' -> caches and shows 'qhello'.
             virtualtext.action.fire()
+            helpers.expect_equal(backend_calls, 1)
             helpers.expect_match(get_suggestion_text(bufnr, virtualtext.ns_id), '^qhello')
 
+            -- Exact same state: served from cache, no new request.
             virtualtext.action.fire()
+            helpers.expect_equal(backend_calls, 1, 'identical state is served from cache')
+            helpers.expect_match(get_suggestion_text(bufnr, virtualtext.ns_id), '^qhello')
 
-            helpers.expect_truthy(virtualtext.action.is_visible(), 'cached suggestion should remain visible immediately')
-            helpers.expect_match(get_suggestion_text(bufnr, virtualtext.ns_id), '^hello')
-            helpers.expect_truthy(pending_callback, 'second backend request should still be in flight')
-
-            pending_callback { 'qhello' }
-
-            helpers.expect_match(get_suggestion_text(bufnr, virtualtext.ns_id), '^hello')
+            -- Typed-ahead state 'bcq' is not a suffix of cached 'abc' (no shift):
+            -- the cache misses and a fresh request fires.
+            current = { lines_before = 'bcq', lines_after = 'xy', opts = {} }
+            virtualtext.action.fire()
+            helpers.expect_equal(backend_calls, 2, 'a shifted state refetches instead of shifting the cache')
 
             virtualtext.action.dismiss()
+            vim.fn.mode = original_mode
+            helpers.delete_buffer(bufnr)
+        end,
+    },
+    {
+        name = 'virtualtext cycling locks a choice that re-shows on returning to the state',
+        run = function()
+            helpers.setup_root_config {
+                provider = 'test',
+                debounce = 0,
+                throttle = 0,
+                n_completions = 2,
+                virtualtext = {
+                    debounce = 0,
+                    throttle = 0,
+                    max_retries = 0,
+                    auto_trigger_mode = 'full',
+                },
+                provider_options = {
+                    test = { model = 'fixture-model', optional = {} },
+                },
+            }
+
+            local real_utils = require 'minuet.utils'
+            local current = { lines_before = 'S', lines_after = '', opts = {} }
+            package.loaded['minuet.utils'] = setmetatable({
+                get_context = function()
+                    return current
+                end,
+            }, { __index = real_utils })
+
+            package.loaded['minuet.backends.test'] = {
+                complete = function(_, callback)
+                    callback { 'AA', 'BB' }
+                end,
+            }
+
+            local virtualtext = helpers.reload 'minuet.virtualtext'
+            virtualtext.setup()
+
+            local bufnr = helpers.create_buffer({ 'x' }, { 1, 1 })
+            vim.b.minuet_virtual_text_auto_trigger_mode = 'full'
+            local original_mode = vim.fn.mode
+            vim.fn.mode = function()
+                return 'i'
+            end
+
+            -- State S: two suggestions, top-ranked AA shown.
+            virtualtext.action.fire()
+            helpers.expect_match(get_suggestion_text(bufnr, virtualtext.ns_id), '^AA')
+
+            -- Cycle to BB: this pins BB as the choice for state S.
+            virtualtext.action.next()
+            helpers.expect_match(get_suggestion_text(bufnr, virtualtext.ns_id), '^BB')
+
+            -- Move to a different, incompatible state: the lock does not apply,
+            -- so the natural ranking (AA) shows there.
+            current = { lines_before = 'AWAY', lines_after = '', opts = {} }
+            vim.api.nvim_exec_autocmds('CursorMovedI', { buffer = bufnr })
+            helpers.expect_match(get_suggestion_text(bufnr, virtualtext.ns_id), '^AA')
+
+            -- Return to state S: the pinned BB comes back, not the ranked AA.
+            current = { lines_before = 'S', lines_after = '', opts = {} }
+            vim.api.nvim_exec_autocmds('CursorMovedI', { buffer = bufnr })
+            helpers.expect_match(
+                get_suggestion_text(bufnr, virtualtext.ns_id),
+                '^BB',
+                'returning to the state re-shows the cycled (locked) choice'
+            )
+
+            -- An explicit dismiss drops the lock; next visit shows the ranked AA.
+            virtualtext.action.dismiss()
+            current = { lines_before = 'S', lines_after = '', opts = {} }
+            vim.api.nvim_exec_autocmds('CursorMovedI', { buffer = bufnr })
+            helpers.expect_match(get_suggestion_text(bufnr, virtualtext.ns_id), '^AA', 'dismiss clears the lock')
+
+            virtualtext.action.dismiss()
+            package.loaded['minuet.utils'] = real_utils
             vim.fn.mode = original_mode
             helpers.delete_buffer(bufnr)
         end,
@@ -895,7 +957,7 @@ return {
         end,
     },
     {
-        name = 'virtualtext consecutive accept_word survives past the cache drift hard limit',
+        name = 'virtualtext consecutive accept_word inserts the whole suggestion with one round-trip',
         run = function()
             helpers.setup_root_config {
                 provider = 'test',
@@ -905,8 +967,6 @@ return {
                     debounce = 0,
                     throttle = 0,
                     max_retries = 0,
-                    cache_max_chars_ahead = 10,
-                    cache_soft_chars_ahead = 5,
                 },
             }
 
@@ -936,12 +996,12 @@ return {
 
             helpers.wait_until(function()
                 return vim.api.nvim_buf_get_lines(bufnr, 0, 1, false)[1] == 'one two three four five'
-            end, 1000, 'five accept_word calls should insert the whole 23-char suggestion despite the 10-char drift limit')
+            end, 1000, 'five accept_word calls should insert the whole 23-char suggestion')
 
             helpers.expect_equal(
                 backend_calls,
                 1,
-                'cache-slide should keep one round-trip enough even past the drift limit'
+                'the cache-slide keeps the entry compatible, so one round-trip is enough'
             )
 
             virtualtext.action.dismiss()
@@ -951,7 +1011,7 @@ return {
         end,
     },
     {
-        name = 'virtualtext fires concurrent requests and an older one still lands matching typed-ahead text',
+        name = 'virtualtext fires concurrent requests and an older one still lands for its own state',
         run = function()
             helpers.setup_root_config {
                 provider = 'test',
@@ -1015,14 +1075,23 @@ return {
             helpers.expect_equal(backend_calls, 2, 'second keystroke must fire its own request, not queue behind the first')
             helpers.expect_equal(#pending, 2, 'both requests should be in flight concurrently')
 
-            -- The OLDER request (fired when before='a') returns and "guesses"
-            -- the char typed since: its completion 'bc' begins with the
-            -- typed-since 'b', so the remaining 'c' should surface as ghost text.
-            pending[1] { 'bc' }
+            -- Request #2 matches the current state 'ab' and shows immediately.
+            pending[2] { 'XY' }
+            helpers.expect_match(get_suggestion_text(bufnr, virtualtext.ns_id), '^XY')
+
+            -- The OLDER request (fired at state 'a') lands later. It still caches
+            -- its completion, but 'a' is not compatible with the current 'ab'
+            -- state (no shift), so the display stays on #2's result.
+            pending[1] { 'Z1' }
+            helpers.expect_match(get_suggestion_text(bufnr, virtualtext.ns_id), '^XY')
+
+            -- Returning to state 'a' re-shows the older request's cached result.
+            before = 'a'
+            vim.api.nvim_exec_autocmds('CursorMovedI', { buffer = bufnr })
             helpers.expect_match(
                 get_suggestion_text(bufnr, virtualtext.ns_id),
-                '^c',
-                'an older in-flight request must still land in the cache and match typed-ahead text'
+                '^Z1',
+                'the older in-flight request still lands in the cache and shows when its state returns'
             )
 
             virtualtext.action.dismiss()

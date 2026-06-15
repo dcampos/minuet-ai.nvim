@@ -143,35 +143,42 @@ local function truncate_at_stop_tokens(text, stop_tokens)
     return text
 end
 
----@param cached string
----@param current string
----@param max_shift integer  skip entries whose shift exceeds this
----@return integer?
-local function match_prefix_to_cached_suffix(cached, current, max_shift)
-    if #cached == 0 then
-        return 0
+-- Content-based compatibility between a cached request prefix `P` and the
+-- current before-cursor text. Both strings END at the cursor, so the immediate
+-- context they share is their common suffix. The completion was generated to
+-- follow `P` (i.e. follow the cursor), so it stays valid as long as that shared
+-- immediate context matches:
+--   * P shorter/equal: cur_before must end with P (the recent context is
+--     identical; older context further back may differ -- that is outside the
+--     range the model saw, so it does not matter).
+--   * P longer (it carries more backward context than the current window):
+--     only valid when the current window is itself truncated (there really is
+--     more buffer above) AND P ends with cur_before. If the current window is
+--     the complete before-cursor text, a longer P claims context that does not
+--     exist -- this is the "future" case (P = [a][b][c], buffer = [a][b], the
+--     model used [c] which is no longer before the cursor) -- so reject it.
+-- No sliding/shift tolerance: the cursor must sit exactly where the completion
+-- would continue, otherwise we treat it as a miss.
+---@param P string cached lines_before
+---@param cur_before string current lines_before
+---@param cur_incomplete_before boolean current window left-truncated?
+---@return boolean
+local function prefix_compatible(P, cur_before, cur_incomplete_before)
+    if #P <= #cur_before then
+        return cur_before:sub(#cur_before - #P + 1) == P
     end
-    if #current == 0 then
-        return nil
-    end
+    return cur_incomplete_before and P:sub(#P - #cur_before + 1) == cur_before
+end
 
-    -- Bail out early when the two strings differ in length by more than
-    -- max_shift — no match within the allowed shift window is possible.
-    if math.abs(#current - #cached) > max_shift then
-        return nil
-    end
-
-    local max_len = math.min(#cached, #current)
-    -- Only scan shifts up to max_shift: typed_since length = #current - len,
-    -- so len >= #current - max_shift.
-    local min_len = math.max(1, #current - max_shift)
-    for len = max_len, min_len, -1 do
-        if cached:sub(#cached - len + 1) == current:sub(1, len) then
-            return len
-        end
-    end
-
-    return nil
+-- The cached suffix `S` and the current after-cursor text must agree on their
+-- overlap (the shorter is a prefix of the longer). Changes further down, past
+-- whichever suffix was actually sent, are outside range and keep the entry
+-- compatible.
+---@param S string cached lines_after
+---@param cur_after string current lines_after
+---@return boolean
+local function suffix_compatible(S, cur_after)
+    return S:sub(1, #cur_after) == cur_after or cur_after:sub(1, #S) == S
 end
 
 --- Extract the request parameters that distinguish one cache slot from another.
@@ -192,31 +199,26 @@ local function extract_cache_params(cfg)
     }
 end
 
---- Derive effective suggestions from ctx.cache.
---- A cache entry matches when: provider/model, non-stop optional fields, and
---- stop tokens are all equal; the after-context is still compatible; and the
---- before-context suffix/prefix overlap is within the configured shift window.
---- Completions whose raw text starts with the text typed since the overlap are
---- returned with that prefix stripped. Results are deduplicated.
----
---- Returns (results, needs_refresh): needs_refresh is true when at least one
---- matched entry fell in the soft-limit zone (cursor drifted past
---- cache_soft_chars_ahead but within cache_max_chars_ahead), signalling that a
---- background re-fetch is worthwhile.
+--- Derive the compatible completions for the current buffer state from
+--- ctx.cache, ranked by how much backward prefix context they matched (longer
+--- is better: more context means the completion is more likely the genuine
+--- continuation, and a longer prefix is also probably warm on the server's KV
+--- cache). A cache entry contributes when provider/model, non-stop optional
+--- fields and stop tokens are all equal, and its prefix/suffix are content-
+--- compatible with the current cursor (see prefix_compatible / suffix_compatible
+--- -- no shift tolerance, no time component). Completions are shown verbatim
+--- (the cursor sits exactly where they continue) and deduplicated, keeping the
+--- longest matching prefix for ranking.
 ---@param ctx minuet.VirtualtextSuggestionContext
 ---@param params table   output of extract_cache_params for the current request
 ---@param cur_before string  current lines_before
 ---@param cur_after string   current lines_after
----@param cfg table  effective config
----@return string[], boolean
-local function pool_suggestions(ctx, params, cur_before, cur_after, cfg)
-    local vt_cfg = cfg.virtualtext or {}
-    local hard_limit = vt_cfg.cache_max_chars_ahead or 40
-    local soft_limit = vt_cfg.cache_soft_chars_ahead or 20
-
+---@param cur_incomplete_before boolean current window left-truncated?
+---@return string[]
+local function pool_suggestions(ctx, params, cur_before, cur_after, cur_incomplete_before)
     local results = {}
-    local seen = {}
-    local needs_refresh = false
+    local best_len = {} -- completion -> longest matching prefix length
+    local order = {} -- completion -> first-seen index, for a stable tie-break
 
     -- Normalise a stop-token list so nil and {} compare equal.
     local function norm_stops(t)
@@ -241,42 +243,26 @@ local function pool_suggestions(ctx, params, cur_before, cur_after, cfg)
         if type(entry.lines_after) ~= 'string' or type(cur_after) ~= 'string' then
             goto continue
         end
-        if not (
-            entry.lines_after:sub(1, #cur_after) == cur_after
-            or cur_after:sub(1, #entry.lines_after) == entry.lines_after
-        ) then
-            goto continue
-        end
         if type(entry.lines_before) ~= 'string' or type(cur_before) ~= 'string' then
             goto continue
         end
-
-        local overlap_len = match_prefix_to_cached_suffix(entry.lines_before, cur_before, hard_limit)
-        if overlap_len == nil then
+        if not suffix_compatible(entry.lines_after, cur_after) then
+            goto continue
+        end
+        if not prefix_compatible(entry.lines_before, cur_before, cur_incomplete_before) then
             goto continue
         end
 
-        local typed_since = cur_before:sub(overlap_len + 1)
-        -- Advancing the cursor may drop old context on the left, but that
-        -- dropped prefix must be balanced by newly typed text on the right.
-        -- Otherwise the cache entry was requested ahead of the current cursor.
-        local cache_only_prefix_len = #entry.lines_before - overlap_len
-        if cache_only_prefix_len > #typed_since then
-            goto continue
-        end
-
-        if #typed_since > soft_limit then
-            needs_refresh = true
-        end
-
+        local plen = #entry.lines_before
         for _, comp in ipairs(entry.completions) do
-            if comp:sub(1, #typed_since) == typed_since then
-                local effective = comp:sub(#typed_since + 1)
-                effective = truncate_at_stop_tokens(effective, entry.params.stop_tokens)
-
-                if #effective > 0 and not seen[effective] then
-                    seen[effective] = true
+            local effective = truncate_at_stop_tokens(comp, entry.params.stop_tokens)
+            if #effective > 0 then
+                if best_len[effective] == nil then
+                    best_len[effective] = plen
+                    order[effective] = #results + 1
                     table.insert(results, effective)
+                elseif plen > best_len[effective] then
+                    best_len[effective] = plen
                 end
             end
         end
@@ -284,7 +270,60 @@ local function pool_suggestions(ctx, params, cur_before, cur_after, cfg)
         ::continue::
     end
 
-    return results, needs_refresh
+    table.sort(results, function(a, b)
+        if best_len[a] ~= best_len[b] then
+            return best_len[a] > best_len[b]
+        end
+        return order[a] < order[b]
+    end)
+
+    return results
+end
+
+--- Is the locked suggestion still showable at the current buffer state? Uses
+--- the same content-based compatibility as a cache entry.
+---@param ctx minuet.VirtualtextSuggestionContext
+---@param cur_before string
+---@param cur_after string
+---@param cur_incomplete_before boolean
+---@return boolean
+local function lock_compatible(ctx, cur_before, cur_after, cur_incomplete_before)
+    local lock = ctx.locked
+    return lock ~= nil
+        and suffix_compatible(lock.lines_after, cur_after)
+        and prefix_compatible(lock.lines_before, cur_before, cur_incomplete_before)
+end
+
+--- Build the display list for the current state and pick the active index.
+--- The locked completion -- the one the user explicitly cycled to -- stays #1
+--- for as long as its state remains compatible, so leaving and returning to
+--- that state re-shows it. Otherwise the natural ranking (longest prefix first)
+--- decides. The lock itself is only changed by cycling or cleared by dismiss.
+--- Records the current state on ctx so a later cycle can re-lock against it.
+---@param ctx minuet.VirtualtextSuggestionContext
+---@param params table
+---@param cur_before string
+---@param cur_after string
+---@param cur_incomplete_before boolean
+---@return string[] results, integer choice
+local function derive_suggestions(ctx, params, cur_before, cur_after, cur_incomplete_before)
+    local results = pool_suggestions(ctx, params, cur_before, cur_after, cur_incomplete_before)
+
+    ctx.cur_before = cur_before
+    ctx.cur_after = cur_after
+    ctx.cur_incomplete_before = cur_incomplete_before
+
+    local choice = 1
+    if lock_compatible(ctx, cur_before, cur_after, cur_incomplete_before) then
+        for i, comp in ipairs(results) do
+            if comp == ctx.locked.completion then
+                choice = i
+                break
+            end
+        end
+    end
+
+    return results, choice
 end
 
 ---@class minuet.CacheEntry
@@ -304,6 +343,10 @@ end
 ---@field n_retries? integer
 ---@field request_generation? integer
 ---@field in_accept? boolean set around a synchronous accept edit
+---@field locked? { completion: string, lines_before: string, lines_after: string } user-cycled choice pinned #1 for its state
+---@field cur_before? string before-cursor text of the most recent derive
+---@field cur_after? string after-cursor text of the most recent derive
+---@field cur_incomplete_before? boolean whether cur_before was left-truncated
 
 -- Provider callbacks capture this token; a *hard* cleanup bumps it so in-flight
 -- callbacks cannot repaint ghost text after an explicit dismiss / insert-leave.
@@ -527,13 +570,13 @@ local function trigger(bufnr, overrides, is_retry, is_manual)
     -- Show any already-cached suggestions immediately while the request is in
     -- flight; also skip firing if the cache already satisfies n_completions.
     local n_completions = cfg.n_completions or 3
-    local cached, needs_refresh = pool_suggestions(ctx, params, cur_before, cur_after, cfg)
+    local cached, choice = derive_suggestions(ctx, params, cur_before, cur_after, context.opts.is_incomplete_before)
     if #cached > 0 then
         ctx.suggestions = cached
-        ctx.choice = ctx.choice or 1
+        ctx.choice = choice
         ctx.shown_choices = ctx.shown_choices or {}
         update_preview(ctx)
-        if not is_retry and #cached >= n_completions and not needs_refresh then
+        if not is_retry and #cached >= n_completions then
             return
         end
     end
@@ -623,12 +666,11 @@ local function trigger(bufnr, overrides, is_retry, is_manual)
         -- user typed ahead while the request was in flight.
         local cmp_ctx_now = utils.make_cmp_context()
         local ctx_now = utils.get_context(cmp_ctx_now, cfg)
-        local effective = pool_suggestions(ctx, params, ctx_now.lines_before, ctx_now.lines_after, cfg)
+        local effective, choice =
+            derive_suggestions(ctx, params, ctx_now.lines_before, ctx_now.lines_after, ctx_now.opts.is_incomplete_before)
         if #effective > 0 then
             ctx.suggestions = effective
-            if not ctx.choice or ctx.choice > #effective then
-                ctx.choice = 1
-            end
+            ctx.choice = choice
             ctx.shown_choices = ctx.shown_choices or {}
             update_preview(ctx)
         end
@@ -655,6 +697,18 @@ local function advance(count, ctx)
     ctx.choice = (ctx.choice + count) % #ctx.suggestions
     if ctx.choice < 1 then
         ctx.choice = #ctx.suggestions
+    end
+
+    -- Cycling pins the chosen completion as #1 for this buffer state: returning
+    -- to the state re-shows it (over the natural longest-prefix ranking) until
+    -- the user cycles again or dismisses.
+    local chosen = ctx.suggestions[ctx.choice]
+    if chosen and ctx.cur_before then
+        ctx.locked = {
+            completion = chosen,
+            lines_before = ctx.cur_before,
+            lines_after = ctx.cur_after,
+        }
     end
 
     update_preview(ctx)
@@ -985,6 +1039,9 @@ end
 
 function action.dismiss()
     local ctx = get_ctx()
+    -- An explicit dismiss also drops the cycle lock; the user does not want the
+    -- pinned choice resurrected on the next visit to that state.
+    ctx.locked = nil
     cleanup(ctx)
 end
 
@@ -1090,21 +1147,19 @@ function autocmd.on_cursor_moved_i()
     if can_show_cache and ctx.last_trigger_params then
         local cfg = require('minuet').config
         local context = utils.get_context(utils.make_cmp_context(), cfg)
-        local effective, needs_refresh = pool_suggestions(ctx, ctx.last_trigger_params, context.lines_before, context.lines_after, cfg)
+        local effective, choice = derive_suggestions(
+            ctx,
+            ctx.last_trigger_params,
+            context.lines_before,
+            context.lines_after,
+            context.opts.is_incomplete_before
+        )
         if #effective > 0 then
             ctx.suggestions = effective
-            if not ctx.choice or ctx.choice > #effective then
-                ctx.choice = 1
-            end
+            ctx.choice = choice
             ctx.shown_choices = ctx.shown_choices or {}
             update_preview(ctx)
-            if needs_refresh and should_auto_trigger() then
-                -- Context drifted past soft limit: keep showing the cached
-                -- result but kick a fresh request in the background.
-                schedule()
-            else
-                stop_timer()
-            end
+            stop_timer()
             return
         end
     end
