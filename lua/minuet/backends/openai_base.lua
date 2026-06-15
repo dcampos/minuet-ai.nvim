@@ -1,6 +1,7 @@
 local M = {}
 local common = require 'minuet.backends.common'
 local utils = require 'minuet.utils'
+local log = require 'minuet.log'
 
 function M.openai_get_text_fn_no_stream(json)
     return json.choices[1].message.content
@@ -200,8 +201,25 @@ function M.complete_openai_fim_base(options, get_text_fn, context, callback, cfg
         local data_file = data_files[idx]
         local args = utils.make_curl_args(transformed_data.end_point, transformed_data.headers, data_file, config)
 
+        local started = log.start()
         local new_job = common.start_job(config.curl_cmd, args, {
+            ---@param out vim.SystemCompleted
             on_exit = function(_, out)
+                log.record {
+                    kind = 'fim',
+                    provider = provider_name,
+                    name = options.name,
+                    model = options.model,
+                    endpoint = transformed_data.end_point,
+                    request = transformed_data.body,
+                    response = out.stdout,
+                    code = out.code,
+                    stderr = out.stderr,
+                    started = started,
+                    request_idx = idx,
+                    n_requests = n_completions,
+                }
+
                 utils.run_event('MinuetRequestFinished', {
                     provider = provider_name,
                     name = options.name,

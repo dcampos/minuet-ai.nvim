@@ -327,6 +327,16 @@ local M = {
     curl_cmd = 'curl',
     -- Extra arguments passed to curl (list of strings).
     curl_extra_args = {},
+    -- Log every request/response as one JSON line (JSONL) for later inspection
+    -- with jq. Each record holds the full request body, the raw response, the
+    -- curl exit code and elapsed_ms. The Authorization header is never logged,
+    -- so API keys stay out. The HTTP runs in a forked curl process, so this
+    -- only adds a small synchronous append off the keystroke hot path.
+    -- Covers codestral / FIM providers and duet.
+    --   false  -> disabled (default)
+    --   true   -> stdpath('cache')/minuet/requests.jsonl
+    --   string -> that file path
+    request_log = false,
     -- If completion item has multiple lines, create another completion item
     -- only containing its first line. This option only has impact for cmp and
     -- blink. For virtualtext, no single line entry will be added.

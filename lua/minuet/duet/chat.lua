@@ -6,6 +6,7 @@
 local common = require 'minuet.duet.backends.common'
 local session = require 'minuet.duet.session'
 local utils = require 'minuet.duet.utils'
+local log = require 'minuet.log'
 
 local M = {}
 
@@ -37,6 +38,11 @@ local function request_inception_edit(opts, callback, ctx)
     local prompt, region = session.build_inception_edit_turn(ctx.bufnr, {
         lines_before = opts.lines_before,
         lines_after = opts.lines_after,
+        max_editable_lines = opts.max_editable_lines,
+        snippet_count = opts.snippet_count,
+        snippet_radius = opts.snippet_radius,
+        max_siblings = opts.max_siblings,
+        git_diff_max_bytes = opts.git_diff_max_bytes,
     })
     local body = {
         model = opts.model,
@@ -62,9 +68,22 @@ local function request_inception_edit(opts, callback, ctx)
     end
 
     local args = utils.make_curl_args(opts.end_point, headers, data_file, duet.request_timeout)
+    local started = log.start()
     common.start_job(root.curl_cmd, args, {
+        ---@param out vim.SystemCompleted
         on_exit = function(_, out)
             pcall(os.remove, data_file)
+            log.record {
+                kind = 'duet_inception',
+                provider = duet.provider,
+                model = opts.model,
+                endpoint = opts.end_point,
+                request = body,
+                response = out.stdout,
+                code = out.code,
+                stderr = out.stderr,
+                started = started,
+            }
             if out.code ~= 0 then
                 callback { error = ('curl exited %s: %s'):format(tostring(out.code), tostring(out.stderr or '')) }
                 return
@@ -87,8 +106,14 @@ local function request_inception_edit(opts, callback, ctx)
                 return
             end
 
-            local replacement = split_region(content)
-            local patch = session.render_edit(region.original_lines, replacement, region.path, 0)
+            -- "None" is Mercury Edit's explicit no-edit signal; otherwise the
+            -- response is the rewritten editable region. render_edit yields nil
+            -- when the region comes back unchanged (the other no-edit path).
+            local patch
+            if vim.trim(strip_markdown_fence(content)) ~= 'None' then
+                local replacement = split_region(content)
+                patch = session.render_edit(region.original_lines, replacement, region.path, 0)
+            end
             if not patch then
                 if ctx.mode == 'manual' then
                     callback { error = 'Mercury Edit returned no change for manual prediction' }
@@ -157,9 +182,22 @@ function M.request(messages, tools, callback, ctx)
 
     local args = utils.make_curl_args(opts.end_point, headers, data_file, duet.request_timeout)
 
+    local started = log.start()
     common.start_job(root.curl_cmd, args, {
+        ---@param out vim.SystemCompleted
         on_exit = function(_, out)
             pcall(os.remove, data_file)
+            log.record {
+                kind = 'duet_chat',
+                provider = provider,
+                model = opts.model,
+                endpoint = opts.end_point,
+                request = body,
+                response = out.stdout,
+                code = out.code,
+                stderr = out.stderr,
+                started = started,
+            }
             if out.code ~= 0 then
                 callback { error = ('curl exited %s: %s'):format(tostring(out.code), tostring(out.stderr or '')) }
                 return
