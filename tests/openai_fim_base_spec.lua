@@ -208,4 +208,212 @@ return {
             end
         end,
     },
+    {
+        name = 'openai FIM backend shows the first-sent request ahead of a later one within the grace',
+        run = function()
+            local root = helpers.setup_root_config {
+                n_completions = 2,
+                request_timeout = 1,
+                curl_extra_args = {},
+                fim_filter_context = false,
+                first_request_grace_ms = 10000,
+            }
+
+            local base = helpers.reload 'minuet.backends.openai_base'
+            local common = require 'minuet.backends.common'
+            local utils = require 'minuet.utils'
+
+            local saved = {
+                make_tmp_file = utils.make_tmp_file,
+                make_curl_args = utils.make_curl_args,
+                stream_decode = utils.stream_decode,
+                start_job = common.start_job,
+                terminate = common.terminate_all_jobs,
+            }
+            local function restore()
+                utils.make_tmp_file = saved.make_tmp_file
+                utils.make_curl_args = saved.make_curl_args
+                utils.stream_decode = saved.stream_decode
+                common.start_job = saved.start_job
+                common.terminate_all_jobs = saved.terminate
+            end
+
+            local ok, err = pcall(function()
+                local n = 0
+                utils.make_tmp_file = function()
+                    n = n + 1
+                    return '/tmp/fim-' .. n
+                end
+                utils.make_curl_args = function(_, _, data_file)
+                    return { '-d', '@' .. data_file }
+                end
+                -- Tag each completion with its request number (its body file).
+                utils.stream_decode = function(_, data_file)
+                    return 'comp-' .. data_file:match '(%d+)'
+                end
+                common.terminate_all_jobs = function() end
+                local jobs = {}
+                common.start_job = function(_, _, handlers)
+                    table.insert(jobs, handlers)
+                    return { pid = #jobs }
+                end
+
+                local options = {
+                    name = 'Codestral',
+                    model = 'codestral-latest',
+                    end_point = 'https://example.test/v1/fim/completions',
+                    api_key = function()
+                        return 'test-key'
+                    end,
+                    stream = true,
+                    optional = {},
+                    transform = {},
+                    template = {
+                        prompt = function(before)
+                            return before
+                        end,
+                        suffix = function(_, after)
+                            return after
+                        end,
+                    },
+                }
+                local get_text_fn = function(json)
+                    return json.choices[1].delta.content
+                end
+
+                local callbacks = {}
+                base.complete_openai_fim_base(options, get_text_fn, {
+                    lines_before = 'x',
+                    lines_after = 'y',
+                    opts = {},
+                }, function(items, done)
+                    table.insert(callbacks, { items = items, done = done })
+                end, root.config)
+
+                helpers.expect_equal(#jobs, 2, 'two parallel requests started')
+
+                -- Request #2 settles first; with #1 still pending it is held.
+                jobs[2].on_exit({ pid = 2 }, { code = 0, stdout = '' })
+                helpers.expect_equal(#callbacks, 0, 'a later-sent request alone does not paint during the grace')
+
+                -- Request #1 settles within the grace -> a single paint, #1 first.
+                jobs[1].on_exit({ pid = 1 }, { code = 0, stdout = '' })
+                helpers.expect_equal(#callbacks, 1, 'painted once #1 arrives')
+                helpers.expect_equal(callbacks[1].items[1], 'comp-1', 'first-sent request is shown first')
+                helpers.expect_equal(callbacks[1].items[2], 'comp-2')
+                helpers.expect_equal(callbacks[1].done, true)
+            end)
+
+            restore()
+
+            if not ok then
+                error(err, 0)
+            end
+        end,
+    },
+    {
+        name = 'openai FIM backend paints a later request after the grace, then #1 jumps to the front',
+        run = function()
+            local root = helpers.setup_root_config {
+                n_completions = 2,
+                request_timeout = 1,
+                curl_extra_args = {},
+                fim_filter_context = false,
+                first_request_grace_ms = 20,
+            }
+
+            local base = helpers.reload 'minuet.backends.openai_base'
+            local common = require 'minuet.backends.common'
+            local utils = require 'minuet.utils'
+
+            local saved = {
+                make_tmp_file = utils.make_tmp_file,
+                make_curl_args = utils.make_curl_args,
+                stream_decode = utils.stream_decode,
+                start_job = common.start_job,
+                terminate = common.terminate_all_jobs,
+            }
+            local function restore()
+                utils.make_tmp_file = saved.make_tmp_file
+                utils.make_curl_args = saved.make_curl_args
+                utils.stream_decode = saved.stream_decode
+                common.start_job = saved.start_job
+                common.terminate_all_jobs = saved.terminate
+            end
+
+            local ok, err = pcall(function()
+                local n = 0
+                utils.make_tmp_file = function()
+                    n = n + 1
+                    return '/tmp/fim-' .. n
+                end
+                utils.make_curl_args = function(_, _, data_file)
+                    return { '-d', '@' .. data_file }
+                end
+                utils.stream_decode = function(_, data_file)
+                    return 'comp-' .. data_file:match '(%d+)'
+                end
+                common.terminate_all_jobs = function() end
+                local jobs = {}
+                common.start_job = function(_, _, handlers)
+                    table.insert(jobs, handlers)
+                    return { pid = #jobs }
+                end
+
+                local options = {
+                    name = 'Codestral',
+                    model = 'codestral-latest',
+                    end_point = 'https://example.test/v1/fim/completions',
+                    api_key = function()
+                        return 'test-key'
+                    end,
+                    stream = true,
+                    optional = {},
+                    transform = {},
+                    template = {
+                        prompt = function(before)
+                            return before
+                        end,
+                        suffix = function(_, after)
+                            return after
+                        end,
+                    },
+                }
+                local get_text_fn = function(json)
+                    return json.choices[1].delta.content
+                end
+
+                local callbacks = {}
+                base.complete_openai_fim_base(options, get_text_fn, {
+                    lines_before = 'x',
+                    lines_after = 'y',
+                    opts = {},
+                }, function(items, done)
+                    table.insert(callbacks, { items = items, done = done })
+                end, root.config)
+
+                -- Request #2 settles first; #1 still pending so it is held.
+                jobs[2].on_exit({ pid = 2 }, { code = 0, stdout = '' })
+                helpers.expect_equal(#callbacks, 0, 'held synchronously during the grace')
+
+                -- After the grace expires the later request is painted (not done).
+                helpers.wait_until(function()
+                    return #callbacks >= 1
+                end, 1000, 'grace expiry should paint the later request')
+                helpers.expect_equal(callbacks[#callbacks].items[1], 'comp-2', 'after grace, the later request shows')
+                helpers.expect_equal(callbacks[#callbacks].done, false, 'not done while #1 is still pending')
+
+                -- When #1 finally lands it jumps to the front.
+                jobs[1].on_exit({ pid = 1 }, { code = 0, stdout = '' })
+                helpers.expect_equal(callbacks[#callbacks].items[1], 'comp-1', '#1 jumps to the front when it lands')
+                helpers.expect_equal(callbacks[#callbacks].done, true)
+            end)
+
+            restore()
+
+            if not ok then
+                error(err, 0)
+            end
+        end,
+    },
 }

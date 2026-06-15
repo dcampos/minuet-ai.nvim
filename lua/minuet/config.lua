@@ -362,6 +362,13 @@ local M = {
     -- chat LLM cannot guarantee the exact number of completion items
     -- specified, as this parameter serves only as a prompt guideline.
     n_completions = 3,
+    -- FIM only. When several requests run in parallel (n_completions > 1) we
+    -- bias the shown suggestion toward the request sent first, rather than
+    -- whichever streams back first (the first to finish tends to be the
+    -- shortest). If a later-sent request settles before request #1, we wait up
+    -- to this many milliseconds for #1 before painting the later one. Set to 0
+    -- to paint as soon as anything arrives.
+    first_request_grace_ms = 100,
     --  Length of context after cursor used to filter completion text.
     --
     -- This setting helps prevent the language model from generating redundant

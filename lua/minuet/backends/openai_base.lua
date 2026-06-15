@@ -183,7 +183,12 @@ function M.complete_openai_fim_base(options, get_text_fn, context, callback, cfg
         table.insert(data_files, data_file)
     end
 
-    local items = {}
+    -- slots[idx] holds the completion from request idx, kept in send order so
+    -- the painted suggestions are biased toward the request we sent first
+    -- rather than whichever finished first (with streaming the first to finish
+    -- tends to be the shortest, which we do not want to favor).
+    local slots = {}
+    local arrived = {}
     local finished = 0
 
     local provider_name = 'openai_fim_compatible'
@@ -196,6 +201,61 @@ function M.complete_openai_fim_base(options, get_text_fn, context, callback, cfg
         n_requests = n_completions,
         timestamp = timestamp,
     })
+
+    -- Bias toward the first-sent request with a short grace window. We paint as
+    -- soon as request #1 has settled or everything is done. If a later-sent
+    -- request settles first, we hold its result for up to first_request_grace_ms
+    -- for #1 to arrive; once that grace expires we paint what we have, and any
+    -- later arrival (including #1, which then jumps back to the front) repaints.
+    local grace_ms = config.first_request_grace_ms or 100
+    local grace_timer
+    local grace_done = false
+
+    local function ordered_items()
+        local list = {}
+        for i = 1, n_completions do
+            if slots[i] ~= nil then
+                table.insert(list, slots[i])
+            end
+        end
+        return list
+    end
+
+    local function stop_grace()
+        if grace_timer then
+            pcall(function()
+                grace_timer:stop()
+                grace_timer:close()
+            end)
+            grace_timer = nil
+        end
+    end
+
+    local function finish_request(idx, result)
+        if result ~= nil then
+            slots[idx] = result
+        end
+        arrived[idx] = true
+        finished = finished + 1
+
+        if arrived[1] or grace_done or finished >= n_completions then
+            stop_grace()
+            callback(prepare_fim_items(ordered_items(), context, config), finished >= n_completions)
+        elseif not grace_timer then
+            grace_timer = vim.uv.new_timer()
+            grace_timer:start(
+                grace_ms,
+                0,
+                vim.schedule_wrap(function()
+                    stop_grace()
+                    grace_done = true
+                    if finished < n_completions then
+                        callback(prepare_fim_items(ordered_items(), context, config), false)
+                    end
+                end)
+            )
+        end
+    end
 
     for idx = 1, n_completions do
         local data_file = data_files[idx]
@@ -237,12 +297,7 @@ function M.complete_openai_fim_base(options, get_text_fn, context, callback, cfg
                     result = utils.no_stream_decode(out, data_file, options.name, get_text_fn)
                 end
 
-                if result then
-                    table.insert(items, result)
-                end
-
-                finished = finished + 1
-                callback(prepare_fim_items(items, context, config), finished >= n_completions)
+                finish_request(idx, result)
             end,
             on_spawn_error = function()
                 os.remove(data_file)
@@ -254,8 +309,7 @@ function M.complete_openai_fim_base(options, get_text_fn, context, callback, cfg
                     request_idx = idx,
                     timestamp = timestamp,
                 })
-                finished = finished + 1
-                callback(prepare_fim_items(items, context, config), finished >= n_completions)
+                finish_request(idx, nil)
             end,
         })
 
