@@ -480,6 +480,20 @@ local function trigger(bufnr, overrides, is_retry, is_manual)
     end
 
     local context = utils.get_context(utils.make_cmp_context(), cfg, anchor)
+    -- Bound the suffix independently of the prefix. The prefix is kept warm on
+    -- the server's KV cache by the anchor, but the suffix is rarely cached, so
+    -- a smaller suffix directly cuts the un-cached token cost per request.
+    local after_opt = (cfg.virtualtext or {}).context_after_chars
+    if after_opt ~= nil then
+        local budget = type(after_opt) == 'function' and after_opt(vim.fn.strchars(context.lines_before)) or after_opt
+        if type(budget) == 'number' and budget >= 0 then
+            local full_after = context.lines_after
+            if vim.fn.strchars(full_after) > budget then
+                context.lines_after = vim.fn.strcharpart(full_after, 0, budget)
+                context.opts.is_incomplete_after = true
+            end
+        end
+    end
     -- Virtual text fires one request per keystroke that misses the cache and
     -- lets them run concurrently, so the backend must NOT terminate the jobs of
     -- earlier in-flight requests: any of them may still return a completion that

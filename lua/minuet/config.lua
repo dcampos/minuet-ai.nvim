@@ -262,6 +262,18 @@ local M = {
         -- Maximum automatic retry requests fired per trigger session when the
         -- pool yields fewer than n_completions effective suggestions.
         max_retries = 3,
+        -- Suffix (after-cursor) size control for FIM requests. The prefix grows
+        -- and stays warm on the server's KV cache via the anchor, but the
+        -- suffix is rarely cached (it shifts as the prefix grows), so every
+        -- char of suffix tends to be paid fresh. This lets you bound it
+        -- independently of the prefix:
+        --   nil      -> no extra cap (suffix sized by context_window/ratio)
+        --   number   -> hard cap of that many chars
+        --   function -> fun(prefix_chars: integer): integer returns the suffix
+        --               char budget given the current prefix length. Use a
+        --               sub-linear curve (e.g. sqrt) so the suffix grows fast
+        --               at first then levels off at a small cap.
+        context_after_chars = nil,
         -- A cache entry is skipped when the cursor has advanced more than this
         -- many characters past it. Keeps the prefix-shift scan bounded and
         -- prevents stale completions from showing up after significant typing.

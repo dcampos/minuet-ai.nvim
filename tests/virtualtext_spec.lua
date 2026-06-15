@@ -100,6 +100,67 @@ return {
         end,
     },
     {
+        name = 'virtualtext caps the suffix sent to the backend via context_after_chars',
+        run = function()
+            helpers.setup_root_config {
+                provider = 'test',
+                debounce = 0,
+                throttle = 0,
+                n_completions = 1,
+                virtualtext = {
+                    debounce = 0,
+                    throttle = 0,
+                    max_retries = 0,
+                    -- function form: budget depends on the prefix length
+                    context_after_chars = function(prefix_chars)
+                        return prefix_chars >= 10 and 5 or 100
+                    end,
+                },
+                provider_options = {
+                    test = { model = 'fixture-model', optional = {} },
+                },
+            }
+
+            local real_utils = require 'minuet.utils'
+            package.loaded['minuet.utils'] = setmetatable({
+                get_context = function()
+                    return {
+                        lines_before = 'abcdefghij', -- 10 chars -> budget 5
+                        lines_after = '0123456789', -- 10 chars, should be cut to 5
+                        opts = {},
+                    }
+                end,
+            }, { __index = real_utils })
+
+            local sent_context
+            package.loaded['minuet.backends.test'] = {
+                complete = function(context, callback)
+                    sent_context = context
+                    callback {}
+                end,
+            }
+
+            local virtualtext = helpers.reload 'minuet.virtualtext'
+            virtualtext.setup()
+
+            local bufnr = helpers.create_buffer({ 'abcdefghij' }, { 1, 10 })
+            local original_mode = vim.fn.mode
+            vim.fn.mode = function()
+                return 'i'
+            end
+
+            virtualtext.action.fire()
+
+            helpers.expect_truthy(sent_context, 'backend received a request')
+            helpers.expect_equal(sent_context.lines_after, '01234', 'suffix capped to the budget')
+            helpers.expect_truthy(sent_context.opts.is_incomplete_after, 'capping marks the suffix incomplete')
+
+            package.loaded['minuet.utils'] = real_utils
+            vim.fn.mode = original_mode
+            helpers.delete_buffer(bufnr)
+        end,
+    },
+    {
         name = 'virtualtext.action.fire reuses cached suggestions across truncated cursor context shifts',
         run = function()
             helpers.setup_root_config {
