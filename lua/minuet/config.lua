@@ -253,8 +253,12 @@ local M = {
         -- Whether show virtual text suggestion when the completion menu
         -- (nvim-cmp or blink-cmp) is visible.
         show_on_completion_menu = false,
-        -- Maximum number of response pool entries kept per buffer.
-        pool_size = 8,
+        -- Maximum number of response pool entries kept per buffer. The pool is
+        -- the local cache of past completions; a larger pool lets us recognise
+        -- more previously-seen buffer states (so a returning cursor re-shows a
+        -- suggestion without a round-trip) and gives the anchor more recent
+        -- prefixes to snap back to. Cheap to keep large -- entries are small.
+        pool_size = 128,
         -- Maximum automatic retry requests fired per trigger session when the
         -- pool yields fewer than n_completions effective suggestions.
         max_retries = 3,
@@ -267,16 +271,21 @@ local M = {
         -- background re-fetch is also fired.
         cache_soft_chars_ahead = 20,
         -- Context anchor reuse: how many chars of new typing the request
-        -- prefix is allowed to grow past the previous request's prefix before
-        -- we re-anchor (drop a chunk of oldest chars). Each anchored request
-        -- keeps the prompt prefix region byte-identical to the previous one so
-        -- the server's KV cache stays warm across keystrokes. This helps any
-        -- FIM model: with the legacy sliding window the prefix shifts on every
-        -- keystroke and the server caches nothing; an anchor lets the
-        -- prefix-region tokens be reused. It is especially valuable for
-        -- SPM-ordered prompts (suffix before prefix), where appending at the
-        -- cursor edge doesn't invalidate suffix tokens either. 0 disables the
-        -- feature (legacy behavior: window slides on every keystroke).
+        -- prefix is allowed to grow past the anchored prefix start before we
+        -- re-anchor ("snap"). The anchor pins the start of the prompt prefix:
+        -- while you type forward it stays put and the prompt just grows at the
+        -- cursor edge, so the leading tokens are byte-identical request to
+        -- request and the server's KV cache stays warm. The bigger this slack,
+        -- the longer the anchor stays pinned during steady typing -- which is
+        -- exactly what we want, since there is no reason to move the anchor
+        -- while the user is just typing. It only snaps when you type past the
+        -- slack, jump, or edit above the anchor. 0 disables the feature
+        -- (legacy behavior: window slides on every keystroke).
+        --
+        -- This helps any FIM model and is especially valuable for SPM-ordered
+        -- prompts (suffix before prefix), where appending at the cursor edge
+        -- doesn't invalidate suffix tokens either. Cached prompt tokens are
+        -- also far cheaper than fresh ones, so a long-lived anchor cuts cost.
         --
         -- The anchor only engages when the file is long enough that the
         -- context window truncates the prefix. Files that fit entirely within
@@ -288,13 +297,10 @@ local M = {
         -- the prompt can exceed `context_window` by up to this many chars, and
         -- each request fetches `context_window + context_growth_slack` chars
         -- per side. So the effective max prompt is `context_window +
-        -- context_growth_slack`. Keep the slack a small fraction of
-        -- `context_window`: with a large window (the 16000 default) 512 is
-        -- ~3%, but with a small window for a local model (e.g. 512) a 1024
-        -- slack would dominate the prompt and blow your token/latency budget —
-        -- scale it down or set it to 0. Re-anchoring is a single chunked cache
-        -- miss rather than a per-char one.
-        context_growth_slack = 512,
+        -- context_growth_slack`. With a small window for a local model (e.g.
+        -- 512) scale this down so it doesn't dominate the prompt; re-anchoring
+        -- is a single chunked cache miss rather than a per-char one.
+        context_growth_slack = 2048,
     },
     provider = 'codestral',
     -- the maximum total characters of the context before and after the cursor
