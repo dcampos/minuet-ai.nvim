@@ -294,6 +294,13 @@ local M = {
         -- temporary "get out of my way" hide that keeps the lock, so re-enabling
         -- or re-triggering at the same state brings the chosen completion back.
         dismiss_drops_lock = true,
+        -- Preemptive tail prefetch while cycling. When cycling (next) lands
+        -- within this many entries of the end of the list, fire a background
+        -- fetch (up to max_retries attempts) for a completion not yet in the
+        -- list, appending it without moving the user. This means scrolling
+        -- further down never blocks on a request. 0 disables it; 1 prefetches
+        -- only when at the very last entry.
+        prefetch_ahead = 0,
         -- Suffix (after-cursor) size control for FIM requests. The prefix grows
         -- and stays warm on the server's KV cache via the anchor, but the
         -- suffix is rarely cached (it shifts as the prefix grows), so every

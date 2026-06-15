@@ -460,7 +460,8 @@ end
 ---@field fetch_state_before? string before-cursor text where the current top-up budget started
 ---@field fetch_params? table params of the current top-up budget's state
 ---@field fetched_this_state? boolean whether a non-retry request already fired at the current top-up state
----@field distinct_active? boolean a cycle-past-the-last fetch for a not-yet-seen completion is in flight
+---@field distinct_active? boolean a fetch for a not-yet-seen completion is in flight
+---@field distinct_silent? boolean the in-flight distinct fetch is a preemptive tail prefetch (no dots, no cycle)
 ---@field distinct_seen? table<string, true> completions already seen when the distinct fetch started
 ---@field distinct_attempts? integer requests fired so far for the current distinct fetch
 
@@ -489,6 +490,7 @@ local function reset_ctx(ctx)
     ctx.fetch_params = nil
     ctx.fetched_this_state = nil
     ctx.distinct_active = nil
+    ctx.distinct_silent = nil
     ctx.distinct_seen = nil
     ctx.distinct_attempts = nil
 end
@@ -547,7 +549,7 @@ local function update_preview(ctx)
     -- inside the counter -- e.g. (2/2 ⋯) -- even for a lone suggestion, so the
     -- user knows a fresh, distinct completion is being fetched.
     local n_sug = ctx.suggestions and #ctx.suggestions or 0
-    if ctx.distinct_active and n_sug >= 1 then
+    if ctx.distinct_active and not ctx.distinct_silent and n_sug >= 1 then
         annot = '(' .. ctx.choice .. '/' .. n_sug .. ' ⋯)'
     elseif n_sug > 1 then
         annot = '(' .. ctx.choice .. '/' .. n_sug .. ')'
@@ -840,8 +842,10 @@ local function trigger(bufnr, overrides, is_retry, is_manual)
             cfg
         )
 
-        -- Cycle-past-the-last distinct fetch: keep the current view + dots until
-        -- a completion the user has not already seen lands, then cycle to it.
+        -- Distinct fetch (loud cycle-past-the-last, or a silent tail prefetch):
+        -- keep the current view until a completion the user has not already seen
+        -- lands. A loud fetch cycles to it; a silent one just appends it, keeping
+        -- the user on their current entry so the next cycle has somewhere to go.
         if ctx.distinct_active then
             local picked
             for i, comp in ipairs(effective) do
@@ -851,26 +855,40 @@ local function trigger(bufnr, overrides, is_retry, is_manual)
                 end
             end
             if picked then
+                local silent = ctx.distinct_silent
+                local current = ctx.suggestions and ctx.choice and ctx.suggestions[ctx.choice]
                 ctx.suggestions = effective
-                ctx.choice = picked
                 ctx.shown_choices = ctx.shown_choices or {}
                 ctx.distinct_active = nil
-                set_lock(
-                    ctx,
-                    params,
-                    effective[picked],
-                    ctx_now.lines_before,
-                    ctx_now.lines_after,
-                    ctx_now.opts.is_incomplete_before
-                )
+                ctx.distinct_silent = nil
+                if silent then
+                    ctx.choice = 1
+                    for i, comp in ipairs(effective) do
+                        if comp == current then
+                            ctx.choice = i
+                            break
+                        end
+                    end
+                else
+                    ctx.choice = picked
+                    set_lock(
+                        ctx,
+                        params,
+                        effective[picked],
+                        ctx_now.lines_before,
+                        ctx_now.lines_after,
+                        ctx_now.opts.is_incomplete_before
+                    )
+                end
                 update_preview(ctx)
             elseif done ~= false then
                 ctx.distinct_attempts = (ctx.distinct_attempts or 0) + 1
                 if next(data) and ctx.distinct_attempts < max_retries then
                     trigger(bufnr, overrides, true)
                 else
-                    -- Gave up: drop the dots, leave the user on the last entry.
+                    -- Gave up: drop the dots (if any), leave the user where they are.
                     ctx.distinct_active = nil
+                    ctx.distinct_silent = nil
                     update_preview(ctx)
                 end
             end
@@ -901,7 +919,46 @@ local function trigger(bufnr, overrides, is_retry, is_manual)
     end, cfg)
 end
 
-local function advance(count, ctx)
+--- Fetch a completion the user has not seen yet at the current state. Two modes:
+---   * loud (default): the user asked for it (cycled off the end). Show loading
+---     dots and cycle to the new completion when it lands.
+---   * silent: a preemptive prefetch fired while cycling near the tail. No dots;
+---     when a distinct completion lands, append it to the list but keep the user
+---     on their current entry, so the next cycle has somewhere to go without a
+---     wait.
+--- Either way it snapshots the seen set and fires requests (bypassing the bucket
+--- gates) until a not-yet-seen completion lands or the attempt budget runs out --
+--- never wrapping back to the first suggestion or to an empty display.
+---@param ctx minuet.VirtualtextSuggestionContext
+---@param overrides? table
+---@param silent? boolean preemptive prefetch: no dots, do not cycle
+local function start_distinct_fetch(ctx, overrides, silent)
+    if ctx.distinct_active then
+        -- A silent prefetch is already running; an explicit (loud) request
+        -- upgrades it so the user gets dots now and is cycled when it lands.
+        if not silent and ctx.distinct_silent then
+            ctx.distinct_silent = nil
+            update_preview(ctx)
+        end
+        return
+    end
+    ctx.distinct_seen = {}
+    for _, s in ipairs(ctx.suggestions or {}) do
+        ctx.distinct_seen[s] = true
+    end
+    ctx.distinct_active = true
+    ctx.distinct_silent = silent or nil
+    ctx.distinct_attempts = 0
+    if not silent then
+        update_preview(ctx)
+    end
+    trigger(api.nvim_get_current_buf(), overrides, false, true)
+end
+
+---@param count integer
+---@param ctx minuet.VirtualtextSuggestionContext
+---@param overrides? table param patch for a preemptive tail prefetch
+local function advance(count, ctx, overrides)
     if ctx ~= get_ctx() then
         return
     end
@@ -920,6 +977,14 @@ local function advance(count, ctx)
     end
 
     update_preview(ctx)
+
+    -- Preemptive tail prefetch: when cycling lands within prefetch_ahead entries
+    -- of the end, fetch a distinct completion in the background so scrolling
+    -- further never blocks on a request.
+    local prefetch_ahead = (require('minuet').config.virtualtext or {}).prefetch_ahead or 0
+    if prefetch_ahead > 0 and count > 0 and ctx.choice > #ctx.suggestions - prefetch_ahead then
+        start_distinct_fetch(ctx, overrides, true)
+    end
 end
 
 local function schedule()
@@ -975,27 +1040,6 @@ function action.fire(overrides)
     trigger(api.nvim_get_current_buf(), overrides, false, true)
 end
 
---- Cycle-past-the-last fetch: the user pressed "next" on the last suggestion, so
---- they have seen every current option and want a different one. Snapshot the
---- seen set, show the loading dots, and fire requests (bypassing the bucket
---- gates) until a not-yet-seen completion lands or the attempt budget runs out --
---- never wrapping back to the first suggestion or to an empty display.
----@param ctx minuet.VirtualtextSuggestionContext
----@param overrides? table
-local function start_distinct_fetch(ctx, overrides)
-    if ctx.distinct_active then
-        return
-    end
-    ctx.distinct_seen = {}
-    for _, s in ipairs(ctx.suggestions or {}) do
-        ctx.distinct_seen[s] = true
-    end
-    ctx.distinct_active = true
-    ctx.distinct_attempts = 0
-    update_preview(ctx)
-    trigger(api.nvim_get_current_buf(), overrides, false, true)
-end
-
 ---@param overrides? table Optional config patch.
 ---Behavior:
 ---  * no suggestions yet → fire a trigger with overrides applied
@@ -1029,7 +1073,7 @@ local function cycle_or_fetch(direction, overrides)
         return
     end
 
-    advance(direction, ctx)
+    advance(direction, ctx, overrides)
 end
 
 action.next = function(overrides)
