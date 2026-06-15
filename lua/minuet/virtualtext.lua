@@ -300,9 +300,10 @@ end
 ---@field cache? minuet.CacheEntry[]
 ---@field last_trigger_params? table
 ---@field last_trigger_was_manual? boolean
----@field last_anchor? { params: table, lines_before: string, lines_after: string }
+---@field anchors? { params: table, lines_before: string, lines_after: string }[]
 ---@field n_retries? integer
 ---@field request_generation? integer
+---@field in_accept? boolean set around a synchronous accept edit
 
 -- Provider callbacks capture this token; a *hard* cleanup bumps it so in-flight
 -- callbacks cannot repaint ghost text after an explicit dismiss / insert-leave.
@@ -464,22 +465,39 @@ local function trigger(bufnr, overrides, is_retry, is_manual)
 
     local params = extract_cache_params(cfg)
 
-    -- Anchor reuse: keep the FIM prompt prefix region byte-identical to the
-    -- previous request as long as the user is typing forward within slack.
-    -- This is what unlocks server-side KV cache hits across keystrokes; the
-    -- legacy fresh window slides on every typed char and never hits cache.
-    -- See utils.get_context for the SPM mechanics.
+    -- Anchor reuse keeps the FIM prompt prefix start byte-identical to a recent
+    -- request so the server's KV cache stays warm. We keep a small ring of
+    -- recent "snap points": the prefix/suffix captured each time we re-anchored.
+    -- While the user types forward the newest snap point keeps matching, so the
+    -- prefix just grows from it (the snap stays put -- slack measures chars
+    -- typed since the snap). On a jump the newest no longer matches, so we look
+    -- back through older snap points and snap to the first one still
+    -- buffer-valid -- its prefix is probably still warm from when we were last
+    -- there. The ring is only searched past its newest entry when that newest
+    -- one fails to anchor, i.e. on a snap, not on every keystroke.
     local growth_slack = (cfg.virtualtext or {}).context_growth_slack or 0
-    local anchor
-    if growth_slack > 0 and ctx.last_anchor and vim.deep_equal(ctx.last_anchor.params, params) then
-        anchor = {
-            prev_lines_before = ctx.last_anchor.lines_before,
-            prev_lines_after = ctx.last_anchor.lines_after,
-            growth_slack = growth_slack,
-        }
-    end
+    local cmp_context = utils.make_cmp_context()
 
-    local context = utils.get_context(utils.make_cmp_context(), cfg, anchor)
+    local context
+    if growth_slack > 0 and ctx.anchors then
+        for i = #ctx.anchors, 1, -1 do
+            local snap = ctx.anchors[i]
+            if vim.deep_equal(snap.params, params) then
+                local cand = utils.get_context(cmp_context, cfg, {
+                    prev_lines_before = snap.lines_before,
+                    prev_lines_after = snap.lines_after,
+                    growth_slack = growth_slack,
+                })
+                if cand.opts.anchored then
+                    context = cand
+                    break
+                end
+            end
+        end
+    end
+    if not context then
+        context = utils.get_context(cmp_context, cfg)
+    end
     -- Bound the suffix independently of the prefix. The prefix is kept warm on
     -- the server's KV cache by the anchor, but the suffix is rarely cached, so
     -- a smaller suffix directly cuts the un-cached token cost per request.
@@ -520,16 +538,24 @@ local function trigger(bufnr, overrides, is_retry, is_manual)
         end
     end
 
-    -- We are about to dispatch the request — record what we sent so the next
-    -- trigger can anchor against it. Update unconditionally (even if the
-    -- request later fails): the server only caches what it actually saw, and
-    -- a stale anchor just means the next request misses cache, which is the
-    -- legacy behavior.
-    ctx.last_anchor = {
-        params = params,
-        lines_before = cur_before,
-        lines_after = cur_after,
-    }
+    -- Record a snap point only when we actually re-anchored (the chosen window
+    -- is a fresh one, not a reuse of an existing snap). Reuses keep growing
+    -- from the fixed snap prefix, so the slack measures chars typed since the
+    -- snap -- which is what keeps the anchor put during steady typing and lets
+    -- it snap only occasionally. We push even if the request later fails: the
+    -- server caches what it saw, and a stale snap just misses next time.
+    if not context.opts.anchored then
+        ctx.anchors = ctx.anchors or {}
+        table.insert(ctx.anchors, {
+            params = params,
+            lines_before = cur_before,
+            lines_after = cur_after,
+        })
+        local max_anchors = (cfg.virtualtext or {}).max_anchors or 8
+        while #ctx.anchors > max_anchors do
+            table.remove(ctx.anchors, 1)
+        end
+    end
 
     local provider = require('minuet.backends.' .. cfg.provider)
 

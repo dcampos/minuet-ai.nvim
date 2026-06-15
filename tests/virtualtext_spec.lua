@@ -161,6 +161,86 @@ return {
         end,
     },
     {
+        name = 'virtualtext anchor snaps back to an older snap point after a jump',
+        run = function()
+            helpers.setup_root_config {
+                provider = 'test',
+                debounce = 0,
+                throttle = 0,
+                n_completions = 1,
+                virtualtext = {
+                    debounce = 0,
+                    throttle = 0,
+                    max_retries = 0,
+                    context_growth_slack = 100,
+                    max_anchors = 8,
+                },
+                provider_options = {
+                    test = { model = 'fixture-model', optional = {} },
+                },
+            }
+
+            local real_utils = require 'minuet.utils'
+            -- control.fresh = the prefix a fresh (no-anchor) window returns.
+            -- control.a_anchors = whether a candidate whose snap prefix is 'A'
+            -- is currently still buffer-valid (anchors). This lets us simulate
+            -- a jump where the newest snap ('B') is stale but an older one ('A')
+            -- is still warm.
+            local control = { fresh = 'A', a_anchors = false }
+            package.loaded['minuet.utils'] = setmetatable({
+                get_context = function(_, _, anchor)
+                    if anchor then
+                        local ok = anchor.prev_lines_before == 'A' and control.a_anchors
+                        return {
+                            lines_before = anchor.prev_lines_before .. '+',
+                            lines_after = 'AFT',
+                            opts = { anchored = ok },
+                        }
+                    end
+                    return { lines_before = control.fresh, lines_after = 'AFT', opts = {} }
+                end,
+            }, { __index = real_utils })
+
+            local sent = {}
+            package.loaded['minuet.backends.test'] = {
+                complete = function(context, callback)
+                    table.insert(sent, context)
+                    callback {}
+                end,
+            }
+
+            local virtualtext = helpers.reload 'minuet.virtualtext'
+            virtualtext.setup()
+
+            local bufnr = helpers.create_buffer({ 'x' }, { 1, 1 })
+            local original_mode = vim.fn.mode
+            vim.fn.mode = function()
+                return 'i'
+            end
+
+            -- T1: fresh window 'A' -> establishes snap point A.
+            virtualtext.action.fire()
+            -- T2: snap A rejected (slack exceeded), fresh window 'B' -> snap B.
+            control.fresh = 'B'
+            virtualtext.action.fire()
+            -- T3: a jump back -- newest snap B is stale, older snap A is warm.
+            control.a_anchors = true
+            virtualtext.action.fire()
+
+            helpers.expect_equal(#sent, 3, 'three requests dispatched')
+            helpers.expect_equal(sent[1].lines_before, 'A', 'T1 sends the fresh A window')
+            helpers.expect_equal(sent[2].lines_before, 'B', 'T2 re-anchors to a fresh B window')
+            -- The newest snap (B) does not match on the jump; the ring looks
+            -- back and snaps to the older A, growing from it ('A+').
+            helpers.expect_equal(sent[3].lines_before, 'A+', 'T3 snaps back to the older warm anchor')
+            helpers.expect_truthy(sent[3].opts.anchored, 'snap-back is an anchored reuse')
+
+            package.loaded['minuet.utils'] = real_utils
+            vim.fn.mode = original_mode
+            helpers.delete_buffer(bufnr)
+        end,
+    },
+    {
         name = 'virtualtext.action.fire reuses cached suggestions across truncated cursor context shifts',
         run = function()
             helpers.setup_root_config {

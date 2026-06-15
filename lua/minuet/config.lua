@@ -259,6 +259,10 @@ local M = {
         -- suggestion without a round-trip) and gives the anchor more recent
         -- prefixes to snap back to. Cheap to keep large -- entries are small.
         pool_size = 128,
+        -- Number of recent anchor "snap points" kept per buffer. On a jump the
+        -- anchor looks back through these (newest first) for a still-valid
+        -- prefix to snap back to, instead of paying for a cold re-anchor.
+        max_anchors = 8,
         -- Maximum automatic retry requests fired per trigger session when the
         -- pool yields fewer than n_completions effective suggestions.
         max_retries = 3,
