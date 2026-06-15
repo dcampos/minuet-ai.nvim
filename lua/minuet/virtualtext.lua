@@ -143,31 +143,42 @@ local function truncate_at_stop_tokens(text, stop_tokens)
     return text
 end
 
--- Content-based compatibility between a cached request prefix `P` and the
--- current before-cursor text. Both strings END at the cursor, so the immediate
--- context they share is their common suffix. The completion was generated to
--- follow `P` (i.e. follow the cursor), so it stays valid as long as that shared
--- immediate context matches:
---   * P shorter/equal: cur_before must end with P (the recent context is
---     identical; older context further back may differ -- that is outside the
---     range the model saw, so it does not matter).
---   * P longer (it carries more backward context than the current window):
---     only valid when the current window is itself truncated (there really is
---     more buffer above) AND P ends with cur_before. If the current window is
---     the complete before-cursor text, a longer P claims context that does not
---     exist -- this is the "future" case (P = [a][b][c], buffer = [a][b], the
---     model used [c] which is no longer before the cursor) -- so reject it.
--- No sliding/shift tolerance: the cursor must sit exactly where the completion
--- would continue, otherwise we treat it as a miss.
+-- How far the cursor has advanced into a cached completion since its request,
+-- or nil when the cached prefix `P` is not compatible with the current
+-- before-cursor text. Both strings end at their own cursor; the shared
+-- immediate context is what keeps the completion valid.
+--   * cur_before starts with P: the window grew as the user typed forward (the
+--     prefix start stays put until the buffer exceeds context_window). The
+--     chars after P are how far the cursor moved into the completion; the
+--     caller keeps only completions beginning with those chars and strips them,
+--     so reading a completion once and typing it out leaves the rest shown.
+--   * P is a suffix of cur_before: same cursor, the cached window just carried
+--     less left context (older context further back is outside the range the
+--     model saw). Nothing was typed since -- advance 0.
+--   * P longer than cur_before: only valid when the current window is itself
+--     truncated (there really is more buffer above) AND P ends with cur_before.
+--     Against a complete prefix a longer P is a "future" prediction (it used
+--     text no longer before the cursor) -- reject it.
+-- A slid window (left context dropped, e.g. cached 'abc' vs current 'bcq') is
+-- intentionally a miss: no fuzzy shift.
 ---@param P string cached lines_before
 ---@param cur_before string current lines_before
 ---@param cur_incomplete_before boolean current window left-truncated?
----@return boolean
-local function prefix_compatible(P, cur_before, cur_incomplete_before)
+---@return integer? typed_since chars typed since the request, nil if incompatible
+local function prefix_typed_since(P, cur_before, cur_incomplete_before)
     if #P <= #cur_before then
-        return cur_before:sub(#cur_before - #P + 1) == P
+        if cur_before:sub(1, #P) == P then
+            return #cur_before - #P
+        end
+        if cur_before:sub(#cur_before - #P + 1) == P then
+            return 0
+        end
+        return nil
     end
-    return cur_incomplete_before and P:sub(#P - #cur_before + 1) == cur_before
+    if cur_incomplete_before and P:sub(#P - #cur_before + 1) == cur_before then
+        return 0
+    end
+    return nil
 end
 
 -- The cached suffix `S` and the current after-cursor text must agree on their
@@ -249,20 +260,26 @@ local function pool_suggestions(ctx, params, cur_before, cur_after, cur_incomple
         if not suffix_compatible(entry.lines_after, cur_after) then
             goto continue
         end
-        if not prefix_compatible(entry.lines_before, cur_before, cur_incomplete_before) then
+        local typed_since = prefix_typed_since(entry.lines_before, cur_before, cur_incomplete_before)
+        if typed_since == nil then
             goto continue
         end
+        -- The user must have typed exactly the head of a completion for its
+        -- remainder to still apply; show only what is left untyped.
+        local typed = cur_before:sub(#cur_before - typed_since + 1)
 
         local plen = #entry.lines_before
         for _, comp in ipairs(entry.completions) do
-            local effective = truncate_at_stop_tokens(comp, entry.params.stop_tokens)
-            if #effective > 0 then
-                if best_len[effective] == nil then
-                    best_len[effective] = plen
-                    order[effective] = #results + 1
-                    table.insert(results, effective)
-                elseif plen > best_len[effective] then
-                    best_len[effective] = plen
+            if comp:sub(1, typed_since) == typed then
+                local effective = truncate_at_stop_tokens(comp:sub(typed_since + 1), entry.params.stop_tokens)
+                if #effective > 0 then
+                    if best_len[effective] == nil then
+                        best_len[effective] = plen
+                        order[effective] = #results + 1
+                        table.insert(results, effective)
+                    elseif plen > best_len[effective] then
+                        best_len[effective] = plen
+                    end
                 end
             end
         end
@@ -280,18 +297,29 @@ local function pool_suggestions(ctx, params, cur_before, cur_after, cur_incomple
     return results
 end
 
---- Is the locked suggestion still showable at the current buffer state? Uses
---- the same content-based compatibility as a cache entry.
+--- The locked suggestion the user cycled to, re-derived for the current buffer
+--- state: its untyped remainder after any text typed since it was pinned, or
+--- nil when the lock no longer applies. Uses the same content-based
+--- compatibility as a cache entry, so returning to -- or typing forward through
+--- -- the locked state keeps the pinned choice resolvable.
 ---@param ctx minuet.VirtualtextSuggestionContext
 ---@param cur_before string
 ---@param cur_after string
 ---@param cur_incomplete_before boolean
----@return boolean
-local function lock_compatible(ctx, cur_before, cur_after, cur_incomplete_before)
+---@return string? remainder the locked completion stripped of typed-since text
+local function locked_remainder(ctx, cur_before, cur_after, cur_incomplete_before)
     local lock = ctx.locked
-    return lock ~= nil
-        and suffix_compatible(lock.lines_after, cur_after)
-        and prefix_compatible(lock.lines_before, cur_before, cur_incomplete_before)
+    if lock == nil or not suffix_compatible(lock.lines_after, cur_after) then
+        return nil
+    end
+    local typed_since = prefix_typed_since(lock.lines_before, cur_before, cur_incomplete_before)
+    if typed_since == nil then
+        return nil
+    end
+    if lock.completion:sub(1, typed_since) ~= cur_before:sub(#cur_before - typed_since + 1) then
+        return nil
+    end
+    return lock.completion:sub(typed_since + 1)
 end
 
 --- Build the display list for the current state and pick the active index.
@@ -314,9 +342,10 @@ local function derive_suggestions(ctx, params, cur_before, cur_after, cur_incomp
     ctx.cur_incomplete_before = cur_incomplete_before
 
     local choice = 1
-    if lock_compatible(ctx, cur_before, cur_after, cur_incomplete_before) then
+    local pinned = locked_remainder(ctx, cur_before, cur_after, cur_incomplete_before)
+    if pinned ~= nil then
         for i, comp in ipairs(results) do
-            if comp == ctx.locked.completion then
+            if comp == pinned then
                 choice = i
                 break
             end

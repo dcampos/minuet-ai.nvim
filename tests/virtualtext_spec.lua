@@ -312,6 +312,73 @@ return {
         end,
     },
     {
+        -- Forward typing grows the window (the prefix start stays put until the
+        -- buffer exceeds context_window), so cached 'abc' is a *prefix* of the
+        -- typed-ahead 'abcq'. The user typed the head of 'qhello', so the cache
+        -- serves the stripped remainder 'hello' without a new request.
+        name = 'virtualtext content cache strips the typed prefix when the window grows forward',
+        run = function()
+            helpers.setup_root_config {
+                provider = 'test',
+                debounce = 0,
+                throttle = 0,
+                n_completions = 1,
+                virtualtext = {
+                    debounce = 0,
+                    throttle = 0,
+                    max_retries = 0,
+                },
+                provider_options = {
+                    test = {
+                        model = 'fixture-model',
+                        optional = {},
+                    },
+                },
+            }
+
+            local real_utils = require 'minuet.utils'
+            local current = { lines_before = 'abc', lines_after = 'xyz', opts = {} }
+            package.loaded['minuet.utils'] = setmetatable({
+                get_context = function()
+                    return current
+                end,
+            }, { __index = real_utils })
+
+            local backend_calls = 0
+            package.loaded['minuet.backends.test'] = {
+                complete = function(_, callback)
+                    backend_calls = backend_calls + 1
+                    callback { 'qhello' }
+                end,
+            }
+
+            local virtualtext = helpers.reload 'minuet.virtualtext'
+            virtualtext.setup()
+
+            local bufnr = helpers.create_buffer({ 'alpha' }, { 1, 5 })
+            local original_mode = vim.fn.mode
+            vim.fn.mode = function()
+                return 'i'
+            end
+
+            -- First request at 'abc' -> caches and shows 'qhello'.
+            virtualtext.action.fire()
+            helpers.expect_equal(backend_calls, 1)
+            helpers.expect_match(get_suggestion_text(bufnr, virtualtext.ns_id), '^qhello')
+
+            -- Typed 'q' into the completion: window grew to 'abcq'. The cache
+            -- serves 'hello' (the untyped remainder), no new request.
+            current = { lines_before = 'abcq', lines_after = 'xyz', opts = {} }
+            virtualtext.action.fire()
+            helpers.expect_equal(backend_calls, 1, 'a grown window is served from cache, not refetched')
+            helpers.expect_match(get_suggestion_text(bufnr, virtualtext.ns_id), '^hello')
+
+            virtualtext.action.dismiss()
+            vim.fn.mode = original_mode
+            helpers.delete_buffer(bufnr)
+        end,
+    },
+    {
         name = 'virtualtext cycling locks a choice that re-shows on returning to the state',
         run = function()
             helpers.setup_root_config {
