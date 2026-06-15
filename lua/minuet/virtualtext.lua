@@ -666,11 +666,11 @@ local function trigger(bufnr, overrides, is_retry, is_manual)
         -- user typed ahead while the request was in flight.
         local cmp_ctx_now = utils.make_cmp_context()
         local ctx_now = utils.get_context(cmp_ctx_now, cfg)
-        local effective, choice =
+        local effective, effective_choice =
             derive_suggestions(ctx, params, ctx_now.lines_before, ctx_now.lines_after, ctx_now.opts.is_incomplete_before)
         if #effective > 0 then
             ctx.suggestions = effective
-            ctx.choice = choice
+            ctx.choice = effective_choice
             ctx.shown_choices = ctx.shown_choices or {}
             update_preview(ctx)
         end
