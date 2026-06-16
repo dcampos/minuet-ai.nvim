@@ -108,7 +108,8 @@ return {
                 helpers.expect_match(rec.turns[1].prompt, '<|code_to_edit|>')
                 helpers.expect_match(rec.turns[1].response_raw, 'editcmpl_mock')
                 helpers.expect_match(rec.turns[1].response_content, 'return 42')
-                helpers.expect_match(rec.turns[1].generated_patch, '%+return 42')
+                helpers.expect_match(rec.turns[1].replacement, 'return 42')
+                helpers.expect_falsy(rec.turns[1].generated_patch, 'Mercury must not be routed through apply_patch')
 
                 duet.action.inspect()
                 local inspect_buf = vim.api.nvim_get_current_buf()
@@ -118,6 +119,11 @@ return {
                 helpers.expect_match(inspect_text, '<|current_file_content|>')
                 helpers.expect_match(inspect_text, 'raw response')
                 helpers.expect_match(inspect_text, 'editcmpl_mock')
+                helpers.expect_match(inspect_text, 'parsed replacement')
+                helpers.expect_falsy(
+                    inspect_text:find('generated apply_patch preview', 1, true),
+                    'inspect should show direct Mercury replacement, not a synthetic patch'
+                )
                 require('minuet.duet.inspect').close()
             end, debug.traceback)
 

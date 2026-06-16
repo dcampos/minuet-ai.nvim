@@ -144,18 +144,17 @@ local function request_inception_edit(opts, callback, ctx)
             inspect.response_content = content
 
             -- "None" is Mercury Edit's explicit no-edit signal; otherwise the
-            -- response is the rewritten editable region. render_edit yields nil
-            -- when the region comes back unchanged (the other no-edit path).
-            local patch
+            -- response is the rewritten editable region. Keep it as a direct
+            -- region replacement; do not translate it through apply_patch, whose
+            -- fuzzy matcher can retarget repeated text elsewhere in the buffer.
+            local replacement
             if vim.trim(strip_markdown_fence(content)) ~= 'None' then
-                local replacement = split_region(content)
+                replacement = split_region(content)
                 inspect.replacement = table.concat(replacement, '\n')
-                patch = session.render_edit(region.original_lines, replacement, region.path, 0)
             else
                 inspect.replacement = 'None'
             end
-            inspect.generated_patch = patch
-            if not patch then
+            if not replacement or vim.deep_equal(region.original_lines, replacement) then
                 inspect.outcome = 'no edit'
                 if ctx.mode == 'manual' then
                     inspect.error = 'Mercury Edit returned no change for manual prediction'
@@ -168,8 +167,15 @@ local function request_inception_edit(opts, callback, ctx)
                 }
                 return
             end
-            inspect.outcome = 'patch generated'
-            callback { message = { role = 'assistant', content = patch }, inspect = inspect }
+            inspect.outcome = 'direct replacement generated'
+            callback {
+                direct_edit = {
+                    region = region,
+                    replacement = replacement,
+                    content = content,
+                },
+                inspect = inspect,
+            }
         end,
         on_spawn_error = function()
             pcall(os.remove, data_file)

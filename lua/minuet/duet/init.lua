@@ -251,6 +251,22 @@ local function show_preview(bufnr, state, original_lines, new_lines, changedtick
     preview.render(bufnr, state)
 end
 
+local function proposed_from_direct_edit(buf_lines, direct)
+    local region = direct.region or {}
+    local replacement = direct.replacement or {}
+    local start_row = math.max(1, tonumber(region.start_row) or 1)
+    local end_row = math.max(start_row - 1, tonumber(region.end_row) or start_row - 1)
+    local proposed = {}
+    for i = 1, math.min(start_row - 1, #buf_lines) do
+        proposed[#proposed + 1] = buf_lines[i]
+    end
+    vim.list_extend(proposed, replacement)
+    for i = end_row + 1, #buf_lines do
+        proposed[#proposed + 1] = buf_lines[i]
+    end
+    return proposed
+end
+
 -- Forward declaration so the async loop can recurse.
 local run_loop
 
@@ -278,6 +294,24 @@ function run_loop(ctx)
                 utils.notify('Minuet duet request failed: ' .. result.error, 'warn', vim.log.levels.WARN)
                 set_outcome(ctx, 'request failed: ' .. tostring(result.error))
                 ctx.state.pending_seq = nil
+                return
+            end
+
+            if result.direct_edit then
+                if utils.get_changedtick(ctx.bufnr) ~= ctx.changedtick then
+                    utils.notify('Minuet duet: buffer changed; discarded.', 'verbose', vim.log.levels.INFO)
+                    set_outcome(ctx, 'buffer changed; discarded')
+                    ctx.state.pending_seq = nil
+                    return
+                end
+                local new_lines = proposed_from_direct_edit(ctx.buf_lines, result.direct_edit)
+                set_outcome(ctx, 'preview shown')
+                if ctx.last then
+                    ctx.last.result = 'shown'
+                end
+                internal.shown = ctx.last
+                ctx.state.pending_seq = nil
+                show_preview(ctx.bufnr, ctx.state, ctx.buf_lines, new_lines, ctx.changedtick, result.direct_edit.content)
                 return
             end
 

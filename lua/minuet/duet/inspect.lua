@@ -1,9 +1,8 @@
 -- Floating-window introspection for the `Minuet duet` session: for each
--- prediction, what the model inferred (reasoning), the patch it proposed, any
--- read() calls, the outcome, and the user's result (accepted / ignored /
--- dismissed / rejected). Newest first; the full inputs (system prompt + user
--- turn) are shown for the most recent prediction only. Toggled via
--- `:Minuet duet inspect`.
+-- prediction, what the model saw, what it returned, the outcome, and the user's
+-- result (accepted / ignored / dismissed / rejected). Chat providers show turns
+-- and tool calls; Mercury Edit shows its native tagged prompt and direct region
+-- replacement. Newest first; toggled via `:Minuet duet inspect`.
 
 local api = vim.api
 local M = {}
