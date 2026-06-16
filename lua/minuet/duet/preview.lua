@@ -85,6 +85,22 @@ local function make_chunks(text, hl_group, cursor_col, cursor_char)
     return chunks
 end
 
+local function preview_mode(config)
+    local mode = ((config.preview or {}).mode or 'inline')
+    if mode == 'side-to-side' or mode == 'side_by_side' or mode == 'side-by-side' then
+        return 'side_by_side'
+    end
+    return 'inline'
+end
+
+local function side_by_side_chunks(buffer_line, chunks, max_old_width)
+    local width = vim.fn.strdisplaywidth(buffer_line or '')
+    local pad = math.max(2, max_old_width - width + 2)
+    local out = { { string.rep(' ', pad), 'Normal' } }
+    vim.list_extend(out, chunks)
+    return out
+end
+
 --- Return the cursor column if the proposed line at `proposed_idx` (0-based)
 --- carries the cursor, otherwise nil.
 local function cursor_col_for(state, proposed_idx)
@@ -117,10 +133,19 @@ local function render_inserted_lines(bufnr, state, row, lines, proposed_indices,
 end
 
 ---@param hunk MinuetDuetHunk
-local function render_hunk(bufnr, state, hunk, cursor_char)
+local function render_hunk(bufnr, state, hunk, cursor_char, mode)
     local original_start, original_count, proposed_start, proposed_count = unpack(hunk)
     local pair_count = math.min(original_count, proposed_count)
     local first_buffer_row = state.range.start_row + original_start - 1
+    local max_old_width = 0
+
+    if mode == 'side_by_side' then
+        for offset = 0, pair_count - 1 do
+            local buffer_row = first_buffer_row + offset
+            local buffer_line = api.nvim_buf_get_lines(bufnr, buffer_row, buffer_row + 1, false)[1] or ''
+            max_old_width = math.max(max_old_width, vim.fn.strdisplaywidth(buffer_line))
+        end
+    end
 
     for offset = 0, pair_count - 1 do
         local buffer_row = first_buffer_row + offset
@@ -129,6 +154,9 @@ local function render_hunk(bufnr, state, hunk, cursor_char)
         local proposed_idx = proposed_start + offset - 1 -- 0-based index into proposed_lines
         local col = cursor_col_for(state, proposed_idx)
         local chunks = make_chunks(proposed_line, 'MinuetDuetAdd', col, cursor_char)
+        if mode == 'side_by_side' then
+            chunks = side_by_side_chunks(buffer_line, chunks, max_old_width)
+        end
 
         add_extmark(bufnr, state, buffer_row, {
             end_col = #buffer_line,
@@ -235,6 +263,7 @@ function M.render(bufnr, state)
     ---@type MinuetDuetHunk[]
     local hunks = get_hunks(state)
     local cursor_char = config.preview.cursor
+    local mode = preview_mode(config)
 
     if #hunks == 0 then
         render_cursor_on_unchanged_line(bufnr, state, hunks, cursor_char)
@@ -245,7 +274,7 @@ function M.render(bufnr, state)
     end
 
     for _, hunk in ipairs(hunks) do
-        render_hunk(bufnr, state, hunk, cursor_char)
+        render_hunk(bufnr, state, hunk, cursor_char, mode)
     end
 
     render_cursor_on_unchanged_line(bufnr, state, hunks, cursor_char)

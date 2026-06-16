@@ -1614,6 +1614,7 @@ require('minuet').setup {
             cursor_position = '<cursor_position/>', -- Marker the model must preserve exactly once to indicate the final cursor position.
         },
         preview = {
+            mode = 'inline', -- Preview rendering mode: 'inline' (legacy EOL text) or 'side_by_side'.
             cursor = '', -- Virtual marker shown at the predicted cursor location in the preview.
         },
         provider_options = {
