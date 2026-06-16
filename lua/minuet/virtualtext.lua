@@ -607,6 +607,56 @@ local function cleanup(ctx, soft)
     clear_preview()
 end
 
+--- Size the prefix independently of the suffix. utils.get_context splits a
+--- single combined budget (context_window) by context_ratio, so the prefix can
+--- only ever be context_window*context_ratio. When the user wants a direct
+--- prefix size (virtualtext.context_before_chars) decoupled from the suffix
+--- (virtualtext.context_after_chars), translate the two into the combined
+--- window/ratio that get_context already understands: a window of
+--- before + max_suffix split so the before side gets exactly `before`. The
+--- per-request suffix is then shaped down to context_after_chars(actual_prefix)
+--- by the post-anchor pass in trigger. No-op (returns cfg) when
+--- context_before_chars is unset -- the legacy single-budget model.
+---@param cfg table effective config
+---@return table cfg a sizing view of cfg (never mutates the input)
+local function sizing_cfg(cfg)
+    local vt = cfg.virtualtext or {}
+    local before = vt.context_before_chars
+    if type(before) ~= 'number' or before <= 0 then
+        return cfg
+    end
+    -- Ceiling on the suffix so the combined window still leaves the prefix its
+    -- full `before` budget. context_after_chars is sub-linear/capped, so its
+    -- value at the largest prefix we could send (before + growth_slack while
+    -- anchored) is its ceiling.
+    local after = vt.context_after_chars
+    local max_after
+    if type(after) == 'function' then
+        max_after = after(before + (vt.context_growth_slack or 0))
+    elseif type(after) == 'number' then
+        max_after = after
+    else
+        max_after = math.floor(cfg.context_window * (1 - cfg.context_ratio))
+    end
+    max_after = math.max(0, math.floor(tonumber(max_after) or 0))
+    local eff_window = before + max_after
+    return vim.tbl_extend('force', cfg, {
+        context_window = eff_window,
+        context_ratio = before / eff_window,
+    })
+end
+
+--- get_context with the decoupled prefix/suffix sizing applied. All virtualtext
+--- sizing must go through this so cached entries (keyed on lines_before/after)
+--- stay consistent between the trigger and the cursor-moved cache lookup.
+---@param cmp_context table
+---@param cfg table
+---@param anchor? table
+---@return table
+local function vt_get_context(cmp_context, cfg, anchor)
+    return utils.get_context(cmp_context, sizing_cfg(cfg), anchor)
+end
+
 ---@param bufnr integer
 ---@param overrides? table Optional partial config patch, deep-merged onto the
 ---live config for this single request (no global mutation). Use to fire with a
@@ -655,7 +705,7 @@ local function trigger(bufnr, overrides, is_retry, is_manual)
         for i = #ctx.anchors, 1, -1 do
             local snap = ctx.anchors[i]
             if vim.deep_equal(snap.params, params) then
-                local cand = utils.get_context(cmp_context, cfg, {
+                local cand = vt_get_context(cmp_context, cfg, {
                     prev_lines_before = snap.lines_before,
                     prev_lines_after = snap.lines_after,
                     growth_slack = growth_slack,
@@ -668,7 +718,7 @@ local function trigger(bufnr, overrides, is_retry, is_manual)
         end
     end
     if not context then
-        context = utils.get_context(cmp_context, cfg)
+        context = vt_get_context(cmp_context, cfg)
     end
     -- Bound the suffix independently of the prefix. The prefix is kept warm on
     -- the server's KV cache by the anchor, but the suffix is rarely cached, so
@@ -832,7 +882,7 @@ local function trigger(bufnr, overrides, is_retry, is_manual)
         -- Re-read cursor position so we don't flash stale ghost-text when the
         -- user typed ahead while the request was in flight.
         local cmp_ctx_now = utils.make_cmp_context()
-        local ctx_now = utils.get_context(cmp_ctx_now, cfg)
+        local ctx_now = vt_get_context(cmp_ctx_now, cfg)
         local effective, effective_choice, n_fresh_now = derive_suggestions(
             ctx,
             params,
@@ -1435,7 +1485,7 @@ function autocmd.on_cursor_moved_i()
     -- them, without contaminating or being contaminated by the default cache.
     if can_show_cache and ctx.last_trigger_params then
         local cfg = require('minuet').config
-        local context = utils.get_context(utils.make_cmp_context(), cfg)
+        local context = vt_get_context(utils.make_cmp_context(), cfg)
         local effective, choice, n_fresh = derive_suggestions(
             ctx,
             ctx.last_trigger_params,

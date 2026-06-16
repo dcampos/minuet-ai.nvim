@@ -241,6 +241,63 @@ return {
         end,
     },
     {
+        name = 'virtualtext context_before_chars sizes the prefix independently of the suffix',
+        run = function()
+            helpers.setup_root_config {
+                provider = 'test',
+                debounce = 0,
+                throttle = 0,
+                n_completions = 1,
+                virtualtext = {
+                    debounce = 0,
+                    throttle = 0,
+                    max_retries = 0,
+                    context_before_chars = 16000,
+                    context_after_chars = function(p)
+                        return math.min(4000, math.floor(60 * math.sqrt(p)))
+                    end,
+                    context_growth_slack = 12000,
+                },
+                provider_options = { test = { model = 'fixture-model', optional = {} } },
+            }
+
+            local sent = {}
+            package.loaded['minuet.backends.test'] = {
+                complete = function(context, callback)
+                    table.insert(sent, context)
+                    callback {}
+                end,
+            }
+
+            local virtualtext = helpers.reload 'minuet.virtualtext'
+            virtualtext.setup()
+
+            -- A long doc so both sides exceed the window and the prefix would
+            -- otherwise be squeezed to context_window*context_ratio.
+            local lines = {}
+            for i = 1, 600 do
+                lines[i] = ('L%03d '):format(i) .. string.rep('x', 94)
+            end
+            local bufnr = helpers.create_buffer(lines, { 300, 50 })
+            local original_mode = vim.fn.mode
+            vim.fn.mode = function()
+                return 'i'
+            end
+
+            virtualtext.action.fire()
+
+            vim.fn.mode = original_mode
+            helpers.expect_truthy(#sent >= 1, 'a request was dispatched')
+            local pre = vim.fn.strchars(sent[1].lines_before)
+            local suf = vim.fn.strchars(sent[1].lines_after)
+            helpers.expect_equal(pre, 16000, 'prefix gets its full context_before_chars budget')
+            helpers.expect_truthy(suf <= 4000, 'suffix bounded to ~4k, not the 25% split of a 16k window')
+            helpers.expect_truthy(suf >= 3900, 'suffix sized by context_after_chars near its 4k cap')
+
+            helpers.delete_buffer(bufnr)
+        end,
+    },
+    {
         -- Content-based cache (no shift): the same state re-shows from cache
         -- verbatim, but a typed-ahead state (cursor advanced past the cached
         -- position) is no longer "shifted" into a partial match -- it misses

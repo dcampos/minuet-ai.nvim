@@ -301,11 +301,23 @@ local M = {
         -- further down never blocks on a request. 0 disables it; 1 prefetches
         -- only when at the very last entry.
         prefetch_ahead = 0,
+        -- Prefix (before-cursor) size, decoupled from the suffix. By default the
+        -- prefix and suffix share a single budget (`context_window`) split by
+        -- `context_ratio`, so the prefix is only ever context_window*context_ratio
+        -- (e.g. 16000*0.75 = 12000). Set this to size the prefix directly instead:
+        -- the prefix gets exactly this many chars and the suffix is sized on its
+        -- own by `context_after_chars` (below). So `context_before_chars = 16000`
+        -- with the sqrt suffix curve gives a 16k prefix + a ~4k suffix in a long
+        -- doc, rather than 12k/4k. While anchored the prefix still grows up to
+        -- `context_growth_slack` chars past this. nil keeps the legacy combined
+        -- budget. virtualtext (FIM) only; cmp / lsp / blink are unaffected.
+        context_before_chars = nil,
         -- Suffix (after-cursor) size control for FIM requests. The prefix grows
         -- and stays warm on the server's KV cache via the anchor, but the
         -- suffix is rarely cached (it shifts as the prefix grows), so every
         -- char of suffix tends to be paid fresh. This lets you bound it
-        -- independently of the prefix:
+        -- independently of the prefix (it is a function of the actual prefix
+        -- length in the buffer, which in a fresh/short file is below the cap):
         --   nil      -> no extra cap (suffix sized by context_window/ratio)
         --   number   -> hard cap of that many chars
         --   function -> fun(prefix_chars: integer): integer returns the suffix
