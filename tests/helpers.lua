@@ -32,6 +32,10 @@ function M.setup_root_config(overrides)
         config = vim.tbl_deep_extend('force', config, {
             notify = false,
             curl_cmd = 'curl',
+            -- Numbers-only stats persistence defaults on in real use; keep it off
+            -- in tests so specs never append to the real cache dir. Tests that
+            -- assert on it pass an explicit stats_log path via overrides.
+            stats_log = false,
         }, overrides or {}),
     }
 

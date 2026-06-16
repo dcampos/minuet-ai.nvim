@@ -74,6 +74,107 @@ return {
         end,
     },
     {
+        name = 'stats buckets each request into a cache-hit band by cached/input ratio',
+        run = function()
+            stats.reset()
+            rec(1000, 0, 5) -- cold       (0%)
+            rec(1000, 400, 5) -- 25-50%   (40%)
+            rec(1000, 700, 5) -- 50-75%   (70%)
+            rec(1000, 1000, 5) -- exact   (100%)
+
+            local text, win = dashboard()
+            -- One request in cold, one in 25-50, one in 50-75, one exact.
+            helpers.expect_match(text, 'cold%s+[█▏▎▍▌▋▊▉░]+%s+1')
+            helpers.expect_match(text, '100%%%s+[█▏▎▍▌▋▊▉░]+%s+1')
+            -- 1 of 4 rated requests is a literal-exact reuse.
+            helpers.expect_match(text, 'exact 100%% reuse: 1 req %(25%%%)')
+
+            vim.api.nvim_win_close(win, true)
+            stats.reset()
+        end,
+    },
+    {
+        name = 'stats classifies snap-back / pinned / slid and counts server-warm reuse',
+        run = function()
+            stats.reset()
+            local function recd(anchored, would_slide, cached)
+                stats.record {
+                    name = 'Codestral',
+                    model = 'codestral-2508',
+                    elapsed_ms = 200,
+                    anchored = anchored,
+                    would_slide = would_slide,
+                    response = vim.json.encode {
+                        usage = {
+                            prompt_tokens = 1000,
+                            completion_tokens = 5,
+                            prompt_tokens_details = { cached_tokens = cached },
+                        },
+                    },
+                }
+            end
+            recd(true, false, 800) -- snap-back, server warm
+            recd(true, false, 0) -- snap-back, server cold (expected reuse, missed)
+            recd(false, false, 700) -- pinned, server warm
+            recd(false, true, 0) -- slid, server cold (expected miss)
+
+            local text, win = dashboard()
+            helpers.expect_match(text, 'prefix KV reuse')
+            local bars = '[█▏▎▍▌▋▊▉░]+'
+            helpers.expect_match(text, 'snap%-back%s+' .. bars .. '%s+50%%%s+2 fired')
+            helpers.expect_match(text, '2 fired · 1 cold')
+            helpers.expect_match(text, 'pinned%s+' .. bars .. '%s+100%%%s+1')
+            helpers.expect_match(text, 'slid%s+' .. bars .. '%s+0%%%s+1')
+
+            vim.api.nvim_win_close(win, true)
+            stats.reset()
+        end,
+    },
+    {
+        name = 'stats persists a numbers-only JSONL with no request/response bodies',
+        run = function()
+            stats.reset()
+            local path = vim.fn.tempname() .. '.jsonl'
+            local minuet = require 'minuet'
+            minuet.config = minuet.config or {}
+            local saved = minuet.config.stats_log
+            minuet.config.stats_log = path
+
+            stats.record {
+                name = 'Codestral',
+                model = 'codestral-2508',
+                elapsed_ms = 321,
+                anchored = true,
+                would_slide = false,
+                response = vim.json.encode {
+                    choices = { { text = 'SECRET_SOURCE_abc' } },
+                    usage = {
+                        prompt_tokens = 300,
+                        completion_tokens = 5,
+                        prompt_tokens_details = { cached_tokens = 100 },
+                    },
+                },
+            }
+
+            local f = assert(io.open(path, 'r'))
+            local body = f:read '*a'
+            f:close()
+            helpers.expect_falsy(body:find('SECRET_SOURCE', 1, true), 'no response/source text in the stats log')
+
+            local rec = vim.json.decode(vim.split(vim.trim(body), '\n')[1])
+            helpers.expect_equal(rec.input, 300)
+            helpers.expect_equal(rec.cached, 100)
+            helpers.expect_equal(rec.output, 5)
+            helpers.expect_equal(rec.model, 'codestral-2508')
+            helpers.expect_equal(rec.disposition, 'snap')
+            helpers.expect_match(rec.ts, '^%d%d%d%d%-%d%d%-%d%dT%d%d:%d%d:%d%d%.%d%d%d$')
+
+            minuet.config.stats_log = saved
+            os.remove(path)
+            stats.reset()
+        end,
+    },
+    {
         name = 'stats dashboard buffer is read-only and shows an empty state',
         run = function()
             stats.reset()

@@ -469,6 +469,14 @@ function M.get_context(cmp_context, cfg, anchor)
     local opts = {
         is_incomplete_before = false,
         is_incomplete_after = false,
+        -- Whether this fresh (non-anchored) window's prefix would slide this turn
+        -- (the buffer is big enough that the prefix start shifts forward instead
+        -- of staying pinned at the top). A slid prefix sheds its leading tokens,
+        -- so the server's KV for them goes cold -- i.e. a basically-full KV miss
+        -- that an anchor reuse would have avoided. When false the prefix is
+        -- naturally pinned (short file / near top) and stays warm without an
+        -- anchor. Consumed by the stats dashboard's snap-back diagnostics.
+        would_slide = prefix_would_slide,
     }
 
     if n_chars_before + n_chars_after > config.context_window then

@@ -386,6 +386,15 @@ local M = {
     --   true   -> stdpath('cache')/minuet/requests.jsonl
     --   string -> that file path
     request_log = false,
+    -- Numbers-only accounting log for :Minuet stats, one JSON line per finished
+    -- FIM request: model, prompt/completion/cached token counts, latency, ts.
+    -- Unlike request_log this NEVER contains request/response bodies (no source
+    -- code), so it is safe to keep on by default; it persists the dashboard's
+    -- token/cache data so it survives restarts and is greppable with jq.
+    --   true   -> stdpath('cache')/minuet/stats.jsonl (default)
+    --   string -> that file path
+    --   false  -> disabled
+    stats_log = true,
     -- If completion item has multiple lines, create another completion item
     -- only containing its first line. This option only has impact for cmp and
     -- blink. For virtualtext, no single line entry will be added.

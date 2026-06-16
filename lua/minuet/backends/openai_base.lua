@@ -280,13 +280,21 @@ function M.complete_openai_fim_base(options, get_text_fn, context, callback, cfg
                     started = started,
                     request_idx = idx,
                     n_requests = n_completions,
+                    anchored = (context.opts or {}).anchored or false,
+                    would_slide = (context.opts or {}).would_slide or false,
                 }
-                -- Live in-memory token/cache accounting for :Minuet stats.
+                -- Live in-memory token/cache accounting for :Minuet stats. The
+                -- anchor/slide flags carry our *expected* server-cache outcome
+                -- (snap-back reuse vs a basically-full KV miss) so the dashboard
+                -- can cross it against the server's actual cached_tokens.
+                local copts = context.opts or {}
                 stats.record {
                     name = options.name,
                     model = options.model,
                     response = out.stdout,
                     elapsed_ms = elapsed_ms,
+                    anchored = copts.anchored or false,
+                    would_slide = copts.would_slide or false,
                 }
 
                 utils.run_event('MinuetRequestFinished', {
