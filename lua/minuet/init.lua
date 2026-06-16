@@ -229,6 +229,7 @@ local function minuet_complete(arglead, cmdline, _)
             inline_completion = { enable_auto_trigger = true, disable_auto_trigger = true },
         },
         stats = true,
+        log = { on = true, off = true, toggle = true, status = true },
         change_model = complete_change_model_options,
         change_provider = function()
             local providers = {}
@@ -322,6 +323,42 @@ vim.api.nvim_create_user_command('Minuet', function(args)
     actions.lsp = require('minuet.lsp').actions
 
     actions.duet = require('minuet.duet').action
+
+    -- Full request/response logging (bodies = your source code). Off by default;
+    -- this toggles it on demand for deep debugging. The numbers-only stats log
+    -- (config.stats_log) is separate and stays on.
+    local log = require 'minuet.log'
+    actions.log = {
+        on = function()
+            local path = log.enable()
+            vim.notify(
+                'Minuet request log ON -> ' .. (path or '?') .. '  (logs full request bodies)',
+                vim.log.levels.WARN
+            )
+        end,
+        off = function()
+            log.disable()
+            vim.notify('Minuet request log OFF', vim.log.levels.INFO)
+        end,
+        toggle = function()
+            local path = log.toggle()
+            if path then
+                vim.notify(
+                    'Minuet request log ON -> ' .. path .. '  (logs full request bodies)',
+                    vim.log.levels.WARN
+                )
+            else
+                vim.notify('Minuet request log OFF', vim.log.levels.INFO)
+            end
+        end,
+        status = function()
+            local path = log.path()
+            vim.notify(
+                path and ('Minuet request log ON -> ' .. path) or 'Minuet request log OFF',
+                vim.log.levels.INFO
+            )
+        end,
+    }
 
     actions.change_provider = setmetatable({}, {
         __index = function(_, key)

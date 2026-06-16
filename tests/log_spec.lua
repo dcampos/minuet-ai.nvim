@@ -57,6 +57,33 @@ return {
         end,
     },
     {
+        name = 'request log enable/disable/toggle flips config and remembers a custom path',
+        run = function()
+            helpers.setup_root_config { request_log = false }
+            local log = helpers.reload 'minuet.log'
+
+            helpers.expect_falsy(log.path(), 'disabled at start')
+
+            local p = log.enable()
+            helpers.expect_match(p, 'requests%.jsonl$')
+            helpers.expect_truthy(log.enabled(), 'enabled after enable()')
+
+            log.disable()
+            helpers.expect_falsy(log.path(), 'disabled after disable()')
+
+            helpers.expect_truthy(log.toggle(), 'toggle returns a path when enabling')
+            helpers.expect_falsy(log.toggle(), 'toggle returns nil when disabling')
+
+            -- A configured string path is remembered across disable/enable.
+            local custom = vim.fn.tempname() .. '.jsonl'
+            helpers.setup_root_config { request_log = custom }
+            local log2 = helpers.reload 'minuet.log'
+            log2.disable()
+            helpers.expect_falsy(log2.path(), 'disabled hides the custom path')
+            helpers.expect_equal(log2.enable(), custom, 'enable restores the custom path')
+        end,
+    },
+    {
         name = 'request log extracts KV-cache usage from non-streamed and streamed responses',
         run = function()
             local path = vim.fn.tempname() .. '.jsonl'

@@ -97,6 +97,51 @@ function M.enabled()
     return resolve_path() ~= nil
 end
 
+--- Current resolved log path, or nil when disabled.
+---@return string?
+function M.path()
+    return resolve_path()
+end
+
+-- Remembers a configured string path across disable/enable so the :Minuet log
+-- toggle does not forget a custom location set in the user's config.
+---@type string?
+local preferred_path
+
+--- Turn request logging on at runtime. With no argument, restores a previously
+--- configured string path or falls back to the default cache path.
+---@param path? string explicit log file path
+---@return string? path the now-active log path
+function M.enable(path)
+    local config = require('minuet').config
+    if type(path) == 'string' and path ~= '' then
+        config.request_log = path
+    elseif not config.request_log then
+        config.request_log = preferred_path or true
+    end
+    return resolve_path()
+end
+
+--- Turn request logging off at runtime, remembering a custom path for re-enable.
+function M.disable()
+    local config = require('minuet').config
+    if type(config.request_log) == 'string' then
+        preferred_path = config.request_log
+    end
+    config.request_log = false
+end
+
+--- Flip request logging. Returns the active path when it ends up enabled, nil
+--- when it ends up disabled.
+---@return string?
+function M.toggle()
+    if resolve_path() then
+        M.disable()
+        return nil
+    end
+    return M.enable()
+end
+
 --- Monotonic start token to hand back to M.record as `started`.
 ---@return integer
 function M.start()
