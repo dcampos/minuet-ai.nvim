@@ -592,6 +592,16 @@ function M.setup()
         desc = '[minuet.duet] seed session baseline',
     })
 
+    -- Track recent cursor locations across buffers so the Mercury Edit prompt's
+    -- recently_viewed_code_snippets can be centered on where the user has been.
+    api.nvim_create_autocmd({ 'BufEnter', 'CursorHold' }, {
+        group = M.augroup,
+        callback = function(info)
+            session.note_cursor(info.buf)
+        end,
+        desc = '[minuet.duet] record recent cursor locations',
+    })
+
     api.nvim_create_autocmd('BufWipeout', {
         group = M.augroup,
         callback = function(info)

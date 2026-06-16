@@ -193,10 +193,21 @@ local function make_inception_edit_options()
         api_key = 'INCEPTION_API_KEY',
         end_point = 'https://api.inceptionlabs.ai/v1/edit/completions',
         name = 'Inception Mercury Edit 2',
-        -- Inception recommends a small cursor-centered editable region for
-        -- latency. The full file is still present outside the code_to_edit tags.
+        -- Editable region: Inception recommends a small cursor-centered window
+        -- ([cursor-5, cursor+10], ~100-150 tokens) since it dominates output
+        -- latency, with ~25 lines a practical upper bound. The region snaps out
+        -- to enclosing syntax nodes while it fits in max_editable_lines; the full
+        -- file is still present outside the code_to_edit tags.
         lines_before = 5,
         lines_after = 10,
+        max_editable_lines = 25,
+        -- recently_viewed_code_snippets: up to snippet_count cross-file excerpts
+        -- of ~snippet_radius*2 lines around recent cursor rows, plus diagnostics
+        -- and treesitter scope (max_siblings sibling signatures).
+        snippet_count = 3,
+        snippet_radius = 10,
+        max_siblings = 4,
+        git_diff_max_bytes = 8000,
         max_tokens = 1000,
         optional = {},
     }

@@ -80,4 +80,30 @@ INCEPTION_API_KEY=... OPENROUTER_API_KEY=... \
     `M` returned no edit for 24/24 predictions (`MERCURY_EVAL_REPEATS=3`,
     `MERCURY_EVAL_STEPS=8`, run `mercury_edit_2026-06-14_05-32-05`). The same
     provider path succeeds on a code-like rename smoke (`b` -> `board`), so this
-    is a task/domain mismatch rather than a transport failure.
+    is a task/domain mismatch rather than a transport failure. (The tableau needs
+    simplex arithmetic the model will not - and arguably should not - guess, so
+    it is now kept only as an abstention probe, not the Mercury yardstick.)
+  - Format matching: the prompt was brought in line with the documented Next Edit
+    format and the cursortab.nvim reference (the closest open-source Mercury API
+    client), since matching the training format is the main lever:
+    - `recently_viewed_code_snippets` now carries per-item
+      `<|recently_viewed_code_snippet|>` blocks: up to 3 cross-file excerpts (~20
+      lines) centered on recent cursor positions and read from the latest buffer
+      content, plus a `diagnostics` block (nvim LSP) and a `treesitter_context`
+      block (enclosing scope / siblings / imports). `staged_git_diff` is emitted
+      only for `COMMIT_EDITMSG`, matching cursortab.
+    - `code_to_edit` defaults to `[cursor-5, cursor+10]` (Inception's recommended
+      window) and snaps out to enclosing treesitter nodes while it fits in
+      `max_editable_lines` (default 25). The full file stays outside the tags.
+    - `edit_diff_history` is now range-based and matches the reference dialect
+      exactly: per-entry `--- /+++` headers, a synthetic `@@ -1,N +1,M @@` (N/M =
+      non-empty line counts, no real line numbers, no context lines), then the
+      changed block as `-`/`+`. Nearby edits within ~8 lines / ~1s coalesce into
+      one entry; the last 5 are kept, processed at send time (idle decay, inverse-
+      pair collapse, dedup), most recent last.
+    - `"None"` is now treated as Mercury's explicit no-edit signal (in addition to
+      an unchanged editable region).
+    - New module `lua/minuet/duet/nes_context.lua` (treesitter/diagnostics/git);
+      cursor locations are tracked via `session.note_cursor` on BufEnter/CursorHold.
+      Knobs live on `provider_options.inception_edit` (`max_editable_lines`,
+      `snippet_count`, `snippet_radius`, `max_siblings`, `git_diff_max_bytes`).

@@ -30,14 +30,27 @@ return {
         end,
     },
     {
-        name = 'session.render_edit_diff emits conventional unidiff for Mercury Edit history',
+        name = 'session.render_edit_diff emits range-based Mercury Edit history (no context lines, synthetic header)',
         run = function()
-            local block = session.render_edit_diff(before, after, 'net.lua', 8)
+            local block = session.render_edit_diff(before, after, 'net.lua')
             helpers.expect_match(block, '^%-%-%- net%.lua\n%+%+%+ net%.lua')
-            helpers.expect_match(block, '@@ %-')
+            -- synthetic hunk header anchored at line 1, non-empty line counts
+            helpers.expect_match(block, '\n@@ %-1,1 %+1,1 @@\n')
             helpers.expect_match(block, '\n%-local timeout = 30')
             helpers.expect_match(block, '\n%+local timeout_secs = 30')
             helpers.expect_falsy(block:find '%*%*%* Begin Patch')
+            -- unchanged surrounding lines are NOT carried as context
+            helpers.expect_falsy(block:find 'local function connect', 'history is range-based, no context lines')
+        end,
+    },
+    {
+        name = 'session.diff_region returns the bounding changed block before/after',
+        run = function()
+            local original, updated, start_line = session.diff_region(before, after)
+            helpers.expect_equal(original, { 'local timeout = 30' })
+            helpers.expect_equal(updated, { 'local timeout_secs = 30' })
+            helpers.expect_equal(start_line, 1)
+            helpers.expect_falsy(session.diff_region(before, before))
         end,
     },
     {
@@ -124,7 +137,7 @@ return {
         end,
     },
     {
-        name = 'session.build_inception_edit_turn uses Mercury Edit tags and unidiff history',
+        name = 'session.build_inception_edit_turn uses Mercury Edit tags and range-based history',
         run = function()
             local bufnr = helpers.create_buffer({ 'local x = 1', 'local y = 2', 'return x + y' }, { 2, 9 })
             session.clear(bufnr)
@@ -136,13 +149,37 @@ return {
 
             local prompt, region = session.build_inception_edit_turn(bufnr, { lines_before = 1, lines_after = 1 })
             helpers.expect_match(prompt, '<|recently_viewed_code_snippets|>')
+            helpers.expect_match(prompt, '<|/recently_viewed_code_snippets|>')
             helpers.expect_match(prompt, '<|current_file_content|>')
+            helpers.expect_match(prompt, 'current_file_path: %[No Name%]')
             helpers.expect_match(prompt, '<|code_to_edit|>')
             helpers.expect_match(prompt, 'local y =<|cursor|> 2')
             helpers.expect_match(prompt, '<|edit_diff_history|>')
-            helpers.expect_match(prompt, '^.-%-%-%- %[No Name%]\n%+%+%+ %[No Name%]')
+            -- range-based history entry: synthetic header + the changed block
+            helpers.expect_match(
+                prompt,
+                '%-%-%- %[No Name%]\n%+%+%+ %[No Name%]\n@@ %-1,1 %+1,1 @@\n%-local x = 1\n%+local x = 10\n'
+            )
             helpers.expect_equal(region.original_lines, { 'local x = 10', 'local y = 2', 'return x + y' })
             helpers.delete_buffer(bufnr)
+        end,
+    },
+    {
+        name = 'session.build_inception_edit_turn emits cross-file snippets from recent cursor locations',
+        run = function()
+            local other = helpers.create_buffer({ 'def helper():', '    return 1' }, { 1, 0 })
+            vim.api.nvim_buf_set_name(other, 'helper.py')
+            session.note_cursor(other)
+
+            local bufnr = helpers.create_buffer({ 'main = 1', 'main = 2' }, { 2, 0 })
+            session.clear(bufnr)
+            session.rebase(bufnr)
+
+            local prompt = session.build_inception_edit_turn(bufnr, { lines_before = 1, lines_after = 1 })
+            helpers.expect_match(prompt, '<|recently_viewed_code_snippet|>\ncode_snippet_file_path: helper%.py\n')
+            helpers.expect_match(prompt, 'def helper%(%):')
+            helpers.delete_buffer(bufnr)
+            helpers.delete_buffer(other)
         end,
     },
 }
