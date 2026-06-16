@@ -55,9 +55,9 @@ local function get_hunks(state)
     return hunks
 end
 
-local function add_extmark(bufnr, state, row, opts)
+local function add_extmark(bufnr, state, row, opts, col)
     state.extmark_ids = state.extmark_ids or {}
-    local extmark_id = api.nvim_buf_set_extmark(bufnr, M.ns_id, row, 0, opts)
+    local extmark_id = api.nvim_buf_set_extmark(bufnr, M.ns_id, row, col or 0, opts)
     table.insert(state.extmark_ids, extmark_id)
 end
 
@@ -93,17 +93,225 @@ local function preview_mode(config)
     return 'inline'
 end
 
-local function side_by_side_chunks(buffer_line, chunks, max_old_width)
-    local width = vim.fn.strdisplaywidth(buffer_line or '')
-    local pad = math.max(2, max_old_width - width + 2)
-    local out = { { string.rep(' ', pad), 'Normal' } }
-    vim.list_extend(out, chunks)
-    return out
+local cursor_col_for
+
+---@param text string
+---@param i integer 1-based byte index
+---@return integer
+local function utf8_char_len(text, i)
+    local b = text:byte(i) or 0
+    if b < 0x80 then
+        return 1
+    elseif b < 0xe0 then
+        return 2
+    elseif b < 0xf0 then
+        return 3
+    end
+    return 4
+end
+
+---@param ch string
+---@return 'space'|'word'|'punct'
+local function token_class(ch)
+    if ch:match '^%s+$' then
+        return 'space'
+    end
+    if ch:match '^[%w_]+$' then
+        return 'word'
+    end
+    return 'punct'
+end
+
+---@param text string
+---@return { text: string, start_col: integer, end_col: integer }[]
+local function word_tokens(text)
+    local tokens = {}
+    local i = 1
+    while i <= #text do
+        local start = i
+        local char_len = utf8_char_len(text, i)
+        local class = token_class(text:sub(i, i + char_len - 1))
+        i = i + char_len
+
+        if class ~= 'punct' then
+            while i <= #text do
+                char_len = utf8_char_len(text, i)
+                local next_char = text:sub(i, i + char_len - 1)
+                if token_class(next_char) ~= class then
+                    break
+                end
+                i = i + char_len
+            end
+        end
+
+        table.insert(tokens, {
+            text = text:sub(start, i - 1),
+            start_col = start - 1,
+            end_col = i - 1,
+        })
+    end
+    return tokens
+end
+
+---@param old_tokens { text: string }[]
+---@param new_tokens { text: string }[]
+---@return { old_idx: integer, new_idx: integer }[]
+local function lcs_pairs(old_tokens, new_tokens)
+    local old_n, new_n = #old_tokens, #new_tokens
+    local dp = {}
+    for i = old_n + 1, 1, -1 do
+        dp[i] = {}
+        for j = new_n + 1, 1, -1 do
+            if i > old_n or j > new_n then
+                dp[i][j] = 0
+            elseif old_tokens[i].text == new_tokens[j].text then
+                dp[i][j] = dp[i + 1][j + 1] + 1
+            else
+                dp[i][j] = math.max(dp[i + 1][j], dp[i][j + 1])
+            end
+        end
+    end
+
+    local pairs = {}
+    local i, j = 1, 1
+    while i <= old_n and j <= new_n do
+        if old_tokens[i].text == new_tokens[j].text then
+            table.insert(pairs, { old_idx = i, new_idx = j })
+            i = i + 1
+            j = j + 1
+        elseif dp[i + 1][j] >= dp[i][j + 1] then
+            i = i + 1
+        else
+            j = j + 1
+        end
+    end
+    return pairs
+end
+
+---@param tokens { text: string }[]
+---@param first integer
+---@param last integer
+---@return string
+local function token_text(tokens, first, last)
+    local parts = {}
+    for i = first, last do
+        table.insert(parts, tokens[i].text)
+    end
+    return table.concat(parts)
+end
+
+---@param tokens { start_col: integer, end_col: integer }[]
+---@param first integer
+---@param fallback_col integer
+---@return integer
+local function gap_col(tokens, first, fallback_col)
+    if tokens[first] then
+        return tokens[first].start_col
+    end
+    return fallback_col
+end
+
+---@param old_line string
+---@param new_line string
+---@return table[]
+local function word_diff_groups(old_line, new_line)
+    local old_tokens = word_tokens(old_line)
+    local new_tokens = word_tokens(new_line)
+    local pairs = lcs_pairs(old_tokens, new_tokens)
+    local groups = {}
+    local old_idx, new_idx = 1, 1
+
+    local function add_group(old_last, new_last)
+        if old_idx > old_last and new_idx > new_last then
+            return
+        end
+
+        local old_text = old_idx <= old_last and token_text(old_tokens, old_idx, old_last) or ''
+        local new_text = new_idx <= new_last and token_text(new_tokens, new_idx, new_last) or ''
+        local old_start_col = old_idx <= old_last and old_tokens[old_idx].start_col or nil
+        local old_end_col = old_idx <= old_last and old_tokens[old_last].end_col or nil
+        local new_start_col = new_idx <= new_last and new_tokens[new_idx].start_col or nil
+        local insert_col = gap_col(old_tokens, old_idx, #old_line)
+
+        table.insert(groups, {
+            old_text = old_text,
+            new_text = new_text,
+            old_start_col = old_start_col,
+            old_end_col = old_end_col,
+            new_start_col = new_start_col,
+            insert_col = insert_col,
+        })
+    end
+
+    for _, pair in ipairs(pairs) do
+        add_group(pair.old_idx - 1, pair.new_idx - 1)
+        old_idx = pair.old_idx + 1
+        new_idx = pair.new_idx + 1
+    end
+    add_group(#old_tokens, #new_tokens)
+
+    return groups
+end
+
+---@param text string
+---@param text_start_col integer
+---@param cursor_col integer|nil
+---@param cursor_char string
+---@return table[] chunks
+---@return boolean cursor_rendered
+local function add_chunks_with_cursor(text, text_start_col, cursor_col, cursor_char)
+    if not cursor_col or cursor_col < text_start_col or cursor_col > text_start_col + #text then
+        return { { text, 'MinuetDuetAdd' } }, false
+    end
+
+    local rel = cursor_col - text_start_col
+    local before = text:sub(1, rel)
+    local after = text:sub(rel + 1)
+    local chunks = {}
+    if #before > 0 then
+        table.insert(chunks, { before, 'MinuetDuetAdd' })
+    end
+    table.insert(chunks, { cursor_char, 'MinuetDuetCursor' })
+    if #after > 0 then
+        table.insert(chunks, { after, 'MinuetDuetAdd' })
+    end
+    return chunks, true
+end
+
+local function render_side_by_side_line(bufnr, state, row, old_line, new_line, proposed_idx, cursor_char)
+    local cursor_col = cursor_col_for(state, proposed_idx)
+    local cursor_rendered = false
+
+    for _, group in ipairs(word_diff_groups(old_line, new_line)) do
+        if group.old_start_col and group.old_end_col and group.old_end_col > group.old_start_col then
+            add_extmark(bufnr, state, row, {
+                end_col = group.old_end_col,
+                hl_group = 'MinuetDuetDelete',
+            }, group.old_start_col)
+        end
+
+        if group.new_text ~= '' then
+            local text_start_col = group.new_start_col or 0
+            local chunks, has_cursor = add_chunks_with_cursor(group.new_text, text_start_col, cursor_col, cursor_char)
+            cursor_rendered = cursor_rendered or has_cursor
+            add_extmark(bufnr, state, row, {
+                virt_text = chunks,
+                virt_text_pos = 'inline',
+            }, group.old_end_col or group.insert_col)
+        end
+    end
+
+    if cursor_col and not cursor_rendered then
+        add_extmark(bufnr, state, row, {
+            virt_text = { { cursor_char, 'MinuetDuetCursor' } },
+            virt_text_pos = 'inline',
+        }, math.min(cursor_col, #old_line))
+    end
 end
 
 --- Return the cursor column if the proposed line at `proposed_idx` (0-based)
 --- carries the cursor, otherwise nil.
-local function cursor_col_for(state, proposed_idx)
+function cursor_col_for(state, proposed_idx)
     local c = state.proposed_cursor
     if not c then
         return nil
@@ -137,33 +345,25 @@ local function render_hunk(bufnr, state, hunk, cursor_char, mode)
     local original_start, original_count, proposed_start, proposed_count = unpack(hunk)
     local pair_count = math.min(original_count, proposed_count)
     local first_buffer_row = state.range.start_row + original_start - 1
-    local max_old_width = 0
-
-    if mode == 'side_by_side' then
-        for offset = 0, pair_count - 1 do
-            local buffer_row = first_buffer_row + offset
-            local buffer_line = api.nvim_buf_get_lines(bufnr, buffer_row, buffer_row + 1, false)[1] or ''
-            max_old_width = math.max(max_old_width, vim.fn.strdisplaywidth(buffer_line))
-        end
-    end
 
     for offset = 0, pair_count - 1 do
         local buffer_row = first_buffer_row + offset
         local buffer_line = api.nvim_buf_get_lines(bufnr, buffer_row, buffer_row + 1, false)[1] or ''
         local proposed_line = state.proposed_lines[proposed_start + offset] or ''
         local proposed_idx = proposed_start + offset - 1 -- 0-based index into proposed_lines
-        local col = cursor_col_for(state, proposed_idx)
-        local chunks = make_chunks(proposed_line, 'MinuetDuetAdd', col, cursor_char)
-        if mode == 'side_by_side' then
-            chunks = side_by_side_chunks(buffer_line, chunks, max_old_width)
-        end
 
-        add_extmark(bufnr, state, buffer_row, {
-            end_col = #buffer_line,
-            hl_group = 'MinuetDuetDelete',
-            virt_text = chunks,
-            virt_text_pos = 'eol',
-        })
+        if mode == 'side_by_side' then
+            render_side_by_side_line(bufnr, state, buffer_row, buffer_line, proposed_line, proposed_idx, cursor_char)
+        else
+            local col = cursor_col_for(state, proposed_idx)
+            local chunks = make_chunks(proposed_line, 'MinuetDuetAdd', col, cursor_char)
+            add_extmark(bufnr, state, buffer_row, {
+                end_col = #buffer_line,
+                hl_group = 'MinuetDuetDelete',
+                virt_text = chunks,
+                virt_text_pos = 'eol',
+            })
+        end
     end
 
     for offset = pair_count, original_count - 1 do
