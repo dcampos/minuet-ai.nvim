@@ -350,7 +350,12 @@ local M = {
         memory_preamble = 'Your earlier next-edit predictions this session (oldest first), each '
             .. 'followed by what the user did with it:',
         auto_trigger = false,
-        debounce_ms = 150,
+        -- Safety valve for auto-triggered next-edit requests. Manual requests
+        -- bypass this; 0 disables the limit. Edit capture itself is immediate.
+        max_auto_requests_per_second = 10,
+        -- Mercury edit_diff_history is an append-only deque: keep the last N
+        -- uncoalesced edits, including model predictions the user accepted.
+        edit_history_max_entries = 20,
     },
     provider_options = {
         openai = make_openai_options(),

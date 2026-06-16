@@ -77,10 +77,80 @@ return {
             vim.api.nvim_buf_set_lines(bufnr, 0, -1, false, { 'a = 11', 'b = 22' })
             session.capture(bufnr, 3)
             helpers.expect_equal(#session.edits(bufnr), 2)
+            helpers.expect_equal(#session.diff_entries(bufnr), 2)
 
             -- second block reflects only the second change
             helpers.expect_match(session.edits(bufnr)[2], '%+b = 22')
             helpers.expect_falsy(session.edits(bufnr)[2]:find 'a = 11\n%+')
+            helpers.delete_buffer(bufnr)
+        end,
+    },
+    {
+        name = 'session keeps inverse and identical Mercury history entries in order',
+        run = function()
+            local bufnr = helpers.create_buffer({ 'a = 1', 'b = 2' }, { 1, 0 })
+            session.clear(bufnr)
+            session.rebase(bufnr)
+
+            vim.api.nvim_buf_set_lines(bufnr, 0, 1, false, { 'a = 2' })
+            session.capture(bufnr, 3)
+            vim.api.nvim_buf_set_lines(bufnr, 0, 1, false, { 'a = 1' })
+            session.capture(bufnr, 3)
+            vim.api.nvim_buf_set_lines(bufnr, 0, 1, false, { 'a = 2' })
+            session.capture(bufnr, 3)
+
+            helpers.expect_equal(#session.diff_entries(bufnr), 3)
+            local prompt = session.build_inception_edit_turn(bufnr, { lines_before = 1, lines_after = 1 })
+            helpers.expect_equal(select(2, prompt:gsub('@@ %-1,1 %+1,1 @@', '')), 3)
+            helpers.expect_equal(select(2, prompt:gsub('%-a = 1\n%+a = 2', '')), 2)
+            helpers.expect_equal(select(2, prompt:gsub('%-a = 2\n%+a = 1', '')), 1)
+
+            helpers.delete_buffer(bufnr)
+        end,
+    },
+    {
+        name = 'session trims Mercury history as a bounded deque',
+        run = function()
+            local cfg = require('minuet').config.duet.session
+            local saved = cfg.edit_history_max_entries
+            cfg.edit_history_max_entries = 2
+            local bufnr = helpers.create_buffer { 'n = 0' }
+            session.clear(bufnr)
+            session.rebase(bufnr)
+
+            for i = 1, 4 do
+                vim.api.nvim_buf_set_lines(bufnr, 0, -1, false, { 'n = ' .. i })
+                session.capture(bufnr, 3)
+            end
+
+            local entries = session.diff_entries(bufnr)
+            helpers.expect_equal(#entries, 2)
+            helpers.expect_equal(entries[1].original, 'n = 2')
+            helpers.expect_equal(entries[2].original, 'n = 3')
+
+            cfg.edit_history_max_entries = saved
+            helpers.delete_buffer(bufnr)
+        end,
+    },
+    {
+        name = 'session records accepted model edits into Mercury history',
+        run = function()
+            local bufnr = helpers.create_buffer { 'local x = old', 'local y = old' }
+            session.clear(bufnr)
+            session.rebase(bufnr)
+
+            session.record_accepted_edit(
+                bufnr,
+                { 'local x = old', 'local y = old' },
+                { 'local x = new', 'local y = old' },
+                3
+            )
+
+            local entries = session.diff_entries(bufnr)
+            helpers.expect_equal(#entries, 1)
+            helpers.expect_equal(entries[1].original, 'local x = old')
+            helpers.expect_equal(entries[1].updated, 'local x = new')
+            helpers.expect_equal(session.get_state(bufnr).baseline, { 'local x = new', 'local y = old' })
             helpers.delete_buffer(bufnr)
         end,
     },

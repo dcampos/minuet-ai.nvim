@@ -1,7 +1,7 @@
 -- Duet NES session: local edit-history tracking (no undotree) and the
 -- KV-cache-aware message assembly for a long-lived "code session".
 --
--- Edits are captured uncoalesced (one record per change burst) and rendered in
+-- Edits are captured as a bounded, append-only sequence and rendered in
 -- apply_patch dialect WITH expanded context, so the model tracks real buffer
 -- state. See duet-nes-spec.md.
 
@@ -196,20 +196,55 @@ function M.get_state(bufnr)
     return state
 end
 
--- Edit-history coalescing/decay thresholds (mirrors cursortab.nvim).
-local DIFF_PROXIMITY_LINES = 8
-local DIFF_PAUSE_MS = 1000
-local DIFF_MAX_ENTRIES = 5
-local DIFF_IDLE_MS = 5 * 60 * 1000
+local DEFAULT_EDIT_HISTORY_MAX_ENTRIES = 20
 
-local function join_nonempty(a, b)
-    if a == '' then
-        return b
+---@return table
+local function session_config()
+    local ok, minuet = pcall(require, 'minuet')
+    return (ok and minuet.config and minuet.config.duet and minuet.config.duet.session) or {}
+end
+
+---@param state table
+local function trim_diff_entries(state)
+    local max_entries = tonumber(session_config().edit_history_max_entries) or DEFAULT_EDIT_HISTORY_MAX_ENTRIES
+    if max_entries <= 0 then
+        state.diff_entries = {}
+        return
     end
-    if b == '' then
-        return a
+    while #state.diff_entries > max_entries do
+        table.remove(state.diff_entries, 1)
     end
-    return a .. '\n' .. b
+end
+
+--- Append one observed transition to both edit-history forms. This is used for
+--- user edits and accepted model predictions, so the model sees the sequence of
+--- buffer transitions it is actually participating in.
+---@param state table
+---@param before string[]
+---@param after string[]
+---@param path string
+---@param ctx_lines? integer
+---@return string?
+local function append_transition(state, before, after, path, ctx_lines)
+    local block = M.render_edit(before, after, path, ctx_lines)
+    if not block then
+        return nil
+    end
+
+    table.insert(state.edits, block)
+
+    local original, updated, start_line = M.diff_region(before, after)
+    if original then
+        table.insert(state.diff_entries, {
+            original = table.concat(original, '\n'),
+            updated = table.concat(updated, '\n'),
+            start_line = start_line,
+            ts_ms = vim.uv.now(),
+        })
+        trim_diff_entries(state)
+    end
+
+    return block
 end
 
 --- Re-snapshot the baseline (call on attach or after a prediction is applied so
@@ -227,43 +262,27 @@ end
 function M.capture(bufnr, ctx_lines)
     local state = M.get_state(bufnr)
     local cur = get_lines(bufnr)
-    local block = M.render_edit(state.baseline, cur, buf_path(bufnr), ctx_lines)
+    local block = append_transition(state, state.baseline, cur, buf_path(bufnr), ctx_lines)
     if block then
-        table.insert(state.edits, block)
-
-        -- Structured edit_diff_history entry, coalesced with the previous one when
-        -- this edit is close in time and line proximity (so rapid same-area edits
-        -- read as a single range-based block).
-        local original, updated, start_line = M.diff_region(state.baseline, cur)
-        if original then
-            local now = vim.uv.now()
-            local entry = {
-                original = table.concat(original, '\n'),
-                updated = table.concat(updated, '\n'),
-                start_line = start_line,
-                ts_ms = now,
-            }
-            local last = state.diff_entries[#state.diff_entries]
-            if
-                last
-                and (now - last.ts_ms) < DIFF_PAUSE_MS
-                and math.abs(last.start_line - entry.start_line) <= DIFF_PROXIMITY_LINES
-            then
-                last.original = join_nonempty(last.original, entry.original)
-                last.updated = join_nonempty(last.updated, entry.updated)
-                last.start_line = math.min(last.start_line, entry.start_line)
-                last.ts_ms = now
-            else
-                table.insert(state.diff_entries, entry)
-            end
-            while #state.diff_entries > DIFF_MAX_ENTRIES do
-                table.remove(state.diff_entries, 1)
-            end
-        end
-
         state.baseline = cur
         state.last_ms = vim.uv.now()
     end
+    return block
+end
+
+--- Record a model prediction the user accepted. Neovim does not emit TextChanged
+--- for our own buffer write, but the accepted edit is still part of the real edit
+--- trajectory Mercury should see on the next request.
+---@param bufnr integer
+---@param before string[]
+---@param after string[]
+---@param ctx_lines? integer
+---@return string?
+function M.record_accepted_edit(bufnr, before, after, ctx_lines)
+    local state = M.get_state(bufnr)
+    local block = append_transition(state, before, after, buf_path(bufnr), ctx_lines)
+    state.baseline = vim.deepcopy(after)
+    state.last_ms = vim.uv.now()
     return block
 end
 
@@ -417,51 +436,6 @@ local function snap_region(start_row, end_row, syntax_ranges, max_lines)
     return start_row, end_row
 end
 
---- Mercury Edit's send-time edit-history cleanup: drop stale entries, cancel out
---- inverse pairs (A->B then B->A), de-duplicate identical edits. Preserves
---- chronological order (most recent last).
----@param entries { original: string, updated: string, ts_ms: integer }[]
----@param now integer
-local function process_diff_entries(entries, now)
-    local kept = {}
-    for _, e in ipairs(entries) do
-        if not e.ts_ms or (now - e.ts_ms) < DIFF_IDLE_MS then
-            kept[#kept + 1] = e
-        end
-    end
-
-    local removed = {}
-    for i = 1, #kept do
-        if not removed[i] then
-            for j = i + 1, #kept do
-                if
-                    not removed[j]
-                    and vim.trim(kept[i].updated) == vim.trim(kept[j].original)
-                    and vim.trim(kept[j].updated) == vim.trim(kept[i].original)
-                then
-                    removed[i] = true
-                    removed[j] = true
-                    break
-                end
-            end
-        end
-    end
-
-    local last_at = {}
-    for i, e in ipairs(kept) do
-        last_at[vim.trim(e.original) .. '\0' .. vim.trim(e.updated)] = i
-    end
-
-    local out = {}
-    for i, e in ipairs(kept) do
-        local key = vim.trim(e.original) .. '\0' .. vim.trim(e.updated)
-        if not removed[i] and last_at[key] == i then
-            out[#out + 1] = e
-        end
-    end
-    return out
-end
-
 --- Build the Mercury Edit 2 tagged prompt and describe the editable region it
 --- should return, following Inception's Next Edit format: cross-file snippets +
 --- diagnostics + treesitter scope in recently_viewed_code_snippets, the full
@@ -513,7 +487,6 @@ function M.build_inception_edit_turn(bufnr, opts)
     local entries = {}
     vim.list_extend(entries, state.seed_diff_entries or {})
     vim.list_extend(entries, state.diff_entries or {})
-    entries = process_diff_entries(entries, vim.uv.now())
 
     local buf = {}
     local function w(s)

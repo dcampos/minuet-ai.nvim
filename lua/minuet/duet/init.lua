@@ -14,7 +14,7 @@ M.auto_enabled = nil -- nil = follow config default; true/false override at runt
 local internal = {
     states = {},
     request_seq = 0,
-    debounce = {}, -- bufnr -> uv_timer
+    auto_request_times = {}, -- bufnr -> millisecond timestamps in the last second
     memory = {}, -- bufnr -> list of { patch, result }: inter-diff memory of shown predictions
     shown_mem = nil, -- the memory entry for the preview currently on screen
 }
@@ -147,6 +147,31 @@ local function auto_active()
         return M.auto_enabled
     end
     return require('minuet').config.duet.session.auto_trigger
+end
+
+---@param bufnr integer
+---@return boolean limited true when an auto request should be skipped
+local function auto_rate_limited(bufnr)
+    local limit = tonumber(scfg().max_auto_requests_per_second) or 10
+    if limit <= 0 then
+        return false
+    end
+
+    local now = vim.uv.now()
+    local times = internal.auto_request_times[bufnr]
+    if not times then
+        times = {}
+        internal.auto_request_times[bufnr] = times
+    end
+
+    while times[1] and (now - times[1]) >= 1000 do
+        table.remove(times, 1)
+    end
+    if #times >= limit then
+        return true
+    end
+    times[#times + 1] = now
+    return false
 end
 
 --- Assemble the message list for a prediction: system (+ capability reminder +
@@ -372,6 +397,9 @@ local function predict(mode, opts)
     if not is_file_buffer(bufnr) then
         return -- never predict on the inspect float or other scratch/special buffers
     end
+    if mode == 'auto' and auto_rate_limited(bufnr) then
+        return
+    end
     local state = get_state(bufnr)
     -- A preview still on screen when a new prediction starts was passed over.
     settle('ignored', false)
@@ -449,8 +477,7 @@ local function apply()
     local target_row = first_diff_row(original, proposed)
 
     api.nvim_buf_set_lines(bufnr, 0, -1, false, proposed)
-    -- The accepted edit becomes the new baseline (do not capture it as a user edit).
-    session.rebase(bufnr)
+    session.record_accepted_edit(bufnr, original, proposed, scfg().history_context_lines)
 
     target_row = math.min(target_row, #proposed)
     local line = api.nvim_buf_get_lines(bufnr, target_row - 1, target_row, false)[1] or ''
@@ -503,8 +530,9 @@ local function toggle()
     vim.notify('Minuet duet auto-trigger ' .. (M.auto_enabled and 'enabled' or 'disabled'), vim.log.levels.INFO)
 end
 
--- Debounced per-buffer handler for edits: capture history, invalidate preview,
--- and optionally auto-trigger.
+-- Immediate per-buffer handler for edits: capture history, invalidate preview,
+-- and optionally auto-trigger. Vim already groups edits into meaningful normal-
+-- mode transitions via TextChanged/InsertLeave; delaying here hides that signal.
 local function on_edit(info)
     local bufnr = info.buf
     if not is_file_buffer(bufnr) then
@@ -517,27 +545,10 @@ local function on_edit(info)
         clear_state(bufnr, state)
     end
 
-    local timer = internal.debounce[bufnr]
-    if timer then
-        timer:stop()
-        timer:close()
+    session.capture(bufnr, scfg().history_context_lines)
+    if auto_active() and api.nvim_get_current_buf() == bufnr and is_normal_mode() then
+        predict 'auto'
     end
-    timer = vim.uv.new_timer()
-    internal.debounce[bufnr] = timer
-    timer:start(scfg().debounce_ms or 150, 0, function()
-        timer:stop()
-        timer:close()
-        internal.debounce[bufnr] = nil
-        vim.schedule(function()
-            if not api.nvim_buf_is_loaded(bufnr) then
-                return
-            end
-            session.capture(bufnr, scfg().history_context_lines)
-            if auto_active() and api.nvim_get_current_buf() == bufnr and is_normal_mode() then
-                predict 'auto'
-            end
-        end)
-    end)
 end
 
 local action = {
@@ -607,14 +618,7 @@ function M.setup()
         callback = function(info)
             internal.states[info.buf] = nil
             internal.memory[info.buf] = nil
-            local timer = internal.debounce[info.buf]
-            if timer then
-                pcall(function()
-                    timer:stop()
-                    timer:close()
-                end)
-                internal.debounce[info.buf] = nil
-            end
+            internal.auto_request_times[info.buf] = nil
             session.clear(info.buf)
         end,
         desc = '[minuet.duet] clear state on buf wipeout',

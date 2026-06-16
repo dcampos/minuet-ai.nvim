@@ -82,6 +82,10 @@ return {
                 vim.api.nvim_buf_get_lines(bufnr, 0, -1, false),
                 { 'local x = new', 'local y = old' }
             )
+            local entries = require('minuet.duet.session').diff_entries(bufnr)
+            helpers.expect_equal(#entries, 1)
+            helpers.expect_equal(entries[1].original, 'local x = old')
+            helpers.expect_equal(entries[1].updated, 'local x = new')
             helpers.expect_falsy(duet.action.is_visible(), 'preview should clear after apply')
             helpers.delete_buffer(bufnr)
         end,
@@ -164,7 +168,7 @@ return {
             local bufnr = helpers.create_buffer({ 'local x = old' }, { 1, 12 })
             require('minuet.duet.session').rebase(bufnr)
 
-            -- An auto prediction fires off the edit-capture autocmd (debounced).
+            -- An auto prediction fires immediately off the edit-capture autocmd.
             vim.api.nvim_exec_autocmds('TextChanged', { buffer = bufnr })
             helpers.wait_until(function()
                 return captured.callback ~= nil
@@ -180,6 +184,32 @@ return {
             helpers.expect_equal(captured.calls, 1, 'auto No Edit should not re-request')
             helpers.expect_falsy(duet.action.is_visible(), 'no preview should render for No Edit')
             helpers.expect_equal(vim.api.nvim_buf_get_lines(bufnr, 0, -1, false), { 'local x = old' })
+            helpers.delete_buffer(bufnr)
+        end,
+    },
+    {
+        name = 'duet auto-trigger rate limits rapid edit events',
+        run = function()
+            helpers.setup_root_config {
+                duet = {
+                    preview = { cursor = '|' },
+                    session = { auto_trigger = true, max_auto_requests_per_second = 1 },
+                },
+            }
+            local captured = install_chat_stub()
+            local duet = helpers.reload 'minuet.duet'
+            duet.setup()
+
+            local bufnr = helpers.create_buffer({ 'local x = old' }, { 1, 12 })
+            require('minuet.duet.session').rebase(bufnr)
+
+            vim.api.nvim_exec_autocmds('TextChanged', { buffer = bufnr })
+            helpers.expect_equal(captured.calls, 1)
+            vim.api.nvim_exec_autocmds('TextChanged', { buffer = bufnr })
+            helpers.expect_equal(captured.calls, 1, 'second auto request inside the same second should be skipped')
+
+            duet.action.predict()
+            helpers.expect_equal(captured.calls, 2, 'manual requests bypass the auto safety valve')
             helpers.delete_buffer(bufnr)
         end,
     },
