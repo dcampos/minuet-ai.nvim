@@ -100,6 +100,25 @@ return {
 
                 helpers.expect_equal(vim.api.nvim_buf_get_lines(bufnr, 0, -1, false), { 'return 42' })
                 helpers.expect_falsy(duet.action.is_visible(), 'preview should be cleared after apply')
+
+                local rec = duet.history[#duet.history]
+                helpers.expect_equal(rec.provider, 'inception_edit')
+                helpers.expect_match(rec.user, '<|current_file_content|>')
+                helpers.expect_equal(rec.turns[1].kind, 'inception_edit')
+                helpers.expect_match(rec.turns[1].prompt, '<|code_to_edit|>')
+                helpers.expect_match(rec.turns[1].response_raw, 'editcmpl_mock')
+                helpers.expect_match(rec.turns[1].response_content, 'return 42')
+                helpers.expect_match(rec.turns[1].generated_patch, '%+return 42')
+
+                duet.action.inspect()
+                local inspect_buf = vim.api.nvim_get_current_buf()
+                local inspect_text = table.concat(vim.api.nvim_buf_get_lines(inspect_buf, 0, -1, false), '\n')
+                helpers.expect_match(inspect_text, 'Mercury Edit request')
+                helpers.expect_match(inspect_text, 'prompt sent to Mercury')
+                helpers.expect_match(inspect_text, '<|current_file_content|>')
+                helpers.expect_match(inspect_text, 'raw response')
+                helpers.expect_match(inspect_text, 'editcmpl_mock')
+                require('minuet.duet.inspect').close()
             end, debug.traceback)
 
             vim.env.INCEPTION_API_KEY = original_api_key
@@ -156,6 +175,10 @@ return {
                     return auto_done
                 end, 3000, 'auto unchanged Mercury response did not complete')
                 helpers.expect_match(auto_result.message.content, '%*%*%* No Edit')
+                helpers.expect_equal(auto_result.inspect.kind, 'inception_edit')
+                helpers.expect_equal(auto_result.inspect.outcome, 'no edit')
+                helpers.expect_match(auto_result.inspect.prompt, '<|edit_diff_history|>')
+                helpers.expect_match(auto_result.inspect.response_raw, 'editcmpl_mock')
 
                 local manual_done, manual_result = false, nil
                 chat.request({}, {}, function(result)
@@ -166,6 +189,8 @@ return {
                     return manual_done
                 end, 3000, 'manual unchanged Mercury response did not complete')
                 helpers.expect_match(manual_result.error, 'no change')
+                helpers.expect_equal(manual_result.inspect.outcome, 'no edit')
+                helpers.expect_match(manual_result.inspect.error, 'no change')
             end, debug.traceback)
 
             vim.env.INCEPTION_API_KEY = original_api_key

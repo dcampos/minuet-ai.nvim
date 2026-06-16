@@ -34,6 +34,24 @@ local function fmt_args(args)
     return '{' .. table.concat(parts, ', ') .. '}'
 end
 
+local function fmt_request(req)
+    req = req or {}
+    local parts = {
+        'model=' .. tostring(req.model or '?'),
+        'max_tokens=' .. tostring(req.max_tokens or '?'),
+    }
+    local optional = req.optional or {}
+    local keys = {}
+    for k in pairs(optional) do
+        table.insert(keys, k)
+    end
+    table.sort(keys)
+    for _, k in ipairs(keys) do
+        table.insert(parts, k .. '=' .. vim.inspect(optional[k]))
+    end
+    return table.concat(parts, ' · ')
+end
+
 ---@param L string[]
 ---@param rec table
 local function render_turns(L, rec)
@@ -56,7 +74,51 @@ local function render_turns(L, rec)
     end
     for i, t in ipairs(rec.turns) do
         add('')
-        if t.kind == 'apply_patch' or t.kind == 'content_patch' then
+        if t.kind == 'inception_edit' then
+            local status = t.error and 'error' or (t.outcome or 'response')
+            add(('- turn %d · Mercury Edit request — %s'):format(i, status))
+            add(('  endpoint: %s'):format(t.endpoint or '?'))
+            add(('  request: %s'):format(fmt_request(t.request)))
+            if t.code then
+                add(('  http/curl code: %s'):format(tostring(t.code)))
+            end
+            if t.finish_reason then
+                add(('  finish_reason: %s'):format(tostring(t.finish_reason)))
+            end
+            if t.region then
+                add(
+                    ('  editable region: %s:%s-%s'):format(
+                        tostring(t.region.path or '?'),
+                        tostring(t.region.start_row or '?'),
+                        tostring(t.region.end_row or '?')
+                    )
+                )
+            end
+            if t.error then
+                add('  error:')
+                block(t.error)
+            end
+            if t.prompt then
+                add('  prompt sent to Mercury:')
+                block(t.prompt)
+            end
+            if t.response_raw then
+                add('  raw response:')
+                block(t.response_raw)
+            end
+            if t.response_content then
+                add('  response content:')
+                block(t.response_content)
+            end
+            if t.replacement then
+                add('  parsed replacement:')
+                block(t.replacement)
+            end
+            if t.generated_patch then
+                add('  generated apply_patch preview:')
+                block(t.generated_patch)
+            end
+        elseif t.kind == 'apply_patch' or t.kind == 'content_patch' then
             local status = (t.applied == true and 'applied ✓')
                 or (t.applied == false and 'did NOT apply ✗')
                 or 'discarded'
@@ -108,13 +170,14 @@ local function render(history)
         local rec = history[i]
         add('')
         add('---')
-        add(('## #%d · %s · %s'):format(i, rec.time or '?', rec.mode or '?'))
+        add(('## #%d · %s · %s · %s'):format(i, rec.time or '?', rec.mode or '?', rec.provider or '?'))
         add(('outcome: **%s**  ·  result: **%s**'):format(tostring(rec.outcome), tostring(rec.result or '—')))
         render_turns(L, rec)
 
         -- Full inputs only for the most recent prediction (avoid repeating the
-        -- whole file for every entry).
-        if i == n then
+        -- whole file for every entry). Mercury requests carry their native
+        -- prompt on each recorded request turn above.
+        if i == n and rec.provider ~= 'inception_edit' then
             add('')
             add('### inputs · system prompt')
             add('')

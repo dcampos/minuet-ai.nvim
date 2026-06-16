@@ -25,7 +25,7 @@ local internal = {
 -- inferred over time and which suggestions you accepted / ignored / rejected.
 M.last = nil
 M.history = {}
-local HISTORY_MAX = 12
+local DEFAULT_INSPECT_HISTORY_MAX = 12
 
 --- Record the user's disposition on the prediction whose preview is on screen.
 --- `force` overrides the default (only settle a still-"shown" record), used when
@@ -47,6 +47,11 @@ end
 local function record_turn(ctx, turn)
     if ctx.last then
         table.insert(ctx.last.turns, turn)
+        if turn.kind == 'inception_edit' and turn.prompt then
+            ctx.last.system = ''
+            ctx.last.user = turn.prompt
+            ctx.last.provider = turn.provider or ctx.last.provider
+        end
     end
 end
 
@@ -66,6 +71,17 @@ end
 
 local function scfg()
     return require('minuet').config.duet.session
+end
+
+local function trim_history()
+    local max_history = tonumber(scfg().inspect_history_max) or DEFAULT_INSPECT_HISTORY_MAX
+    if max_history <= 0 then
+        M.history = {}
+        return
+    end
+    while #M.history > max_history do
+        table.remove(M.history, 1)
+    end
 end
 
 local function get_memory(bufnr)
@@ -254,6 +270,10 @@ function run_loop(ctx)
                 return -- superseded or buffer gone
             end
 
+            if result.inspect then
+                record_turn(ctx, result.inspect)
+            end
+
             if result.error then
                 utils.notify('Minuet duet request failed: ' .. result.error, 'warn', vim.log.levels.WARN)
                 set_outcome(ctx, 'request failed: ' .. tostring(result.error))
@@ -428,6 +448,7 @@ local function predict(mode, opts)
         path = vim.fn.fnamemodify(api.nvim_buf_get_name(bufnr), ':.'),
         mode = mode,
         model = popts.model,
+        provider = duet.provider,
         effort = popts.optional and popts.optional.reasoning and popts.optional.reasoning.effort or nil,
         system = messages[1].content,
         user = messages[#messages].content, -- the final user turn (after any memory turns)
@@ -436,9 +457,7 @@ local function predict(mode, opts)
         result = nil, -- user disposition: shown/accepted/dismissed/rejected/ignored
     }
     table.insert(M.history, M.last)
-    if #M.history > HISTORY_MAX then
-        table.remove(M.history, 1)
-    end
+    trim_history()
 
     run_loop {
         bufnr = bufnr,

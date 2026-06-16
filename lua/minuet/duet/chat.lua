@@ -51,9 +51,32 @@ local function request_inception_edit(opts, callback, ctx)
     }
     body = vim.tbl_deep_extend('force', body, opts.optional or {})
 
+    local inspect = {
+        kind = 'inception_edit',
+        provider = duet.provider,
+        model = opts.model,
+        endpoint = opts.end_point,
+        mode = ctx.mode,
+        prompt = prompt,
+        request = {
+            model = body.model,
+            max_tokens = body.max_tokens,
+            optional = opts.optional or {},
+        },
+        region = {
+            path = region.path,
+            start_row = region.start_row,
+            end_row = region.end_row,
+            original = table.concat(region.original_lines or {}, '\n'),
+        },
+        outcome = 'pending',
+    }
+
     local api_key = utils.get_api_key(opts.api_key)
     if not api_key then
-        callback { error = 'duet API key is not set (env ' .. tostring(opts.api_key) .. ')' }
+        inspect.error = 'duet API key is not set (env ' .. tostring(opts.api_key) .. ')'
+        inspect.outcome = 'request setup failed'
+        callback { error = inspect.error, inspect = inspect }
         return
     end
 
@@ -63,7 +86,9 @@ local function request_inception_edit(opts, callback, ctx)
     }
     local data_file = utils.make_tmp_file(body)
     if not data_file then
-        callback { error = 'failed to write request temp file' }
+        inspect.error = 'failed to write request temp file'
+        inspect.outcome = 'request setup failed'
+        callback { error = inspect.error, inspect = inspect }
         return
     end
 
@@ -73,6 +98,9 @@ local function request_inception_edit(opts, callback, ctx)
         ---@param out vim.SystemCompleted
         on_exit = function(_, out)
             pcall(os.remove, data_file)
+            inspect.code = out.code
+            inspect.stderr = out.stderr
+            inspect.response_raw = out.stdout
             log.record {
                 kind = 'duet_inception',
                 provider = duet.provider,
@@ -85,26 +113,35 @@ local function request_inception_edit(opts, callback, ctx)
                 started = started,
             }
             if out.code ~= 0 then
-                callback { error = ('curl exited %s: %s'):format(tostring(out.code), tostring(out.stderr or '')) }
+                inspect.error = ('curl exited %s: %s'):format(tostring(out.code), tostring(out.stderr or ''))
+                inspect.outcome = 'transport error'
+                callback { error = inspect.error, inspect = inspect }
                 return
             end
             local ok, decoded = pcall(vim.json.decode, out.stdout or '')
             if not ok or type(decoded) ~= 'table' then
-                callback { error = 'failed to decode response: ' .. tostring((out.stdout or ''):sub(1, 200)) }
+                inspect.error = 'failed to decode response: ' .. tostring((out.stdout or ''):sub(1, 200))
+                inspect.outcome = 'decode error'
+                callback { error = inspect.error, inspect = inspect }
                 return
             end
+            inspect.response = decoded
             if decoded.error then
-                callback { error = 'API error: ' .. vim.inspect(decoded.error) }
+                inspect.error = 'API error: ' .. vim.inspect(decoded.error)
+                inspect.outcome = 'api error'
+                callback { error = inspect.error, inspect = inspect }
                 return
             end
             local choice = decoded.choices and decoded.choices[1]
             local content = choice and choice.message and choice.message.content
+            inspect.finish_reason = choice and choice.finish_reason or nil
             if type(content) ~= 'string' then
-                callback {
-                    error = 'no editable-region content in response: ' .. tostring((out.stdout or ''):sub(1, 200)),
-                }
+                inspect.error = 'no editable-region content in response: ' .. tostring((out.stdout or ''):sub(1, 200))
+                inspect.outcome = 'malformed response'
+                callback { error = inspect.error, inspect = inspect }
                 return
             end
+            inspect.response_content = content
 
             -- "None" is Mercury Edit's explicit no-edit signal; otherwise the
             -- response is the rewritten editable region. render_edit yields nil
@@ -112,23 +149,33 @@ local function request_inception_edit(opts, callback, ctx)
             local patch
             if vim.trim(strip_markdown_fence(content)) ~= 'None' then
                 local replacement = split_region(content)
+                inspect.replacement = table.concat(replacement, '\n')
                 patch = session.render_edit(region.original_lines, replacement, region.path, 0)
+            else
+                inspect.replacement = 'None'
             end
+            inspect.generated_patch = patch
             if not patch then
+                inspect.outcome = 'no edit'
                 if ctx.mode == 'manual' then
-                    callback { error = 'Mercury Edit returned no change for manual prediction' }
+                    inspect.error = 'Mercury Edit returned no change for manual prediction'
+                    callback { error = inspect.error, inspect = inspect }
                     return
                 end
                 callback {
                     message = { role = 'assistant', content = require('minuet').config.duet.session.no_edit_token },
+                    inspect = inspect,
                 }
                 return
             end
-            callback { message = { role = 'assistant', content = patch } }
+            inspect.outcome = 'patch generated'
+            callback { message = { role = 'assistant', content = patch }, inspect = inspect }
         end,
         on_spawn_error = function()
             pcall(os.remove, data_file)
-            callback { error = 'failed to spawn curl' }
+            inspect.error = 'failed to spawn curl'
+            inspect.outcome = 'spawn error'
+            callback { error = inspect.error, inspect = inspect }
         end,
     })
 end

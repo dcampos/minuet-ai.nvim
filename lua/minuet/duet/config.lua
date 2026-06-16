@@ -342,6 +342,10 @@ local M = {
         capability_reminder_every = 5,
         max_attempts = 3,
         max_reads = 2,
+        -- Number of recent prediction requests kept for `:Minuet duet inspect`
+        -- / <leader>M. Mercury Edit is not chat-shaped, so each request stores
+        -- its full prompt and raw response here for side-by-side inspection.
+        inspect_history_max = 12,
         -- Inter-diff memory: optionally replay this session's earlier predictions
         -- (the model's own patch + what the user did with it) as interleaved turns
         -- BEFORE the full current file. Additive — never replaces the file.
