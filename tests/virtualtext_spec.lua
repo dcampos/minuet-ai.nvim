@@ -298,6 +298,75 @@ return {
         end,
     },
     {
+        name = 'virtualtext context_back_slack pins a larger prefix but reuses down to the floor',
+        run = function()
+            helpers.setup_root_config {
+                provider = 'test',
+                debounce = 0,
+                throttle = 0,
+                n_completions = 1,
+                virtualtext = {
+                    debounce = 0,
+                    throttle = 0,
+                    max_retries = 0,
+                    context_before_chars = 160,
+                    context_back_slack = 80,
+                    context_after_chars = 40,
+                    context_growth_slack = 120,
+                },
+                provider_options = { test = { model = 'fixture-model', optional = {} } },
+            }
+
+            local sent = {}
+            package.loaded['minuet.backends.test'] = {
+                complete = function(context, callback)
+                    table.insert(sent, context)
+                    callback {}
+                end,
+            }
+
+            local virtualtext = helpers.reload 'minuet.virtualtext'
+            virtualtext.setup()
+
+            local lines = {}
+            for i = 1, 120 do
+                lines[i] = (('L%03d-'):format(i)):rep(16)
+            end
+            local bufnr = helpers.create_buffer(lines, { 60, 48 })
+            local original_mode = vim.fn.mode
+            vim.fn.mode = function()
+                return 'i'
+            end
+
+            virtualtext.action.fire()
+            helpers.expect_equal(#sent, 1)
+            helpers.expect_equal(vim.fn.strchars(sent[1].lines_before), 240)
+            helpers.expect_equal(vim.fn.strchars(sent[1].lines_after), 40)
+            helpers.expect_truthy(sent[1].opts.is_incomplete_before)
+            helpers.expect_falsy(sent[1].opts.anchored)
+
+            -- Rewind inside the 80-char backward headroom. The second request
+            -- should send a shorter prefix with the same start, not a cold fresh
+            -- 240-char re-pin.
+            vim.api.nvim_win_set_cursor(0, { 60, 8 })
+            virtualtext.action.fire()
+
+            vim.fn.mode = original_mode
+            helpers.expect_equal(#sent, 2)
+            helpers.expect_truthy(sent[2].opts.anchored, 'rewound request should reuse the warm snap')
+            helpers.expect_truthy(sent[2].opts.suffix_fresh, 'rewound request needs a fresh suffix')
+            helpers.expect_truthy(vim.fn.strchars(sent[2].lines_before) >= 160)
+            helpers.expect_truthy(vim.fn.strchars(sent[2].lines_before) < 240)
+            helpers.expect_equal(
+                sent[1].lines_before:sub(1, #sent[2].lines_before),
+                sent[2].lines_before,
+                'rewound request keeps the same prefix start'
+            )
+
+            helpers.delete_buffer(bufnr)
+        end,
+    },
+    {
         -- Content-based cache (no shift): the same state re-shows from cache
         -- verbatim, but a typed-ahead state (cursor advanced past the cached
         -- position) is no longer "shifted" into a partial match -- it misses

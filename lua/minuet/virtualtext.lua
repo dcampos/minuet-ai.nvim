@@ -449,7 +449,7 @@ end
 ---@field cache? minuet.CacheEntry[]
 ---@field last_trigger_params? table
 ---@field last_trigger_was_manual? boolean
----@field anchors? { params: table, lines_before: string, lines_after: string }[]
+---@field anchors? { params: table, lines_before: string, lines_after: string, is_incomplete_before?: boolean }[]
 ---@field n_retries? integer
 ---@field request_generation? integer
 ---@field in_accept? boolean set around a synchronous accept edit
@@ -625,24 +625,29 @@ local function sizing_cfg(cfg)
     if type(before) ~= 'number' or before <= 0 then
         return cfg
     end
+    -- We *pin* (fetch and send) a larger prefix than the floor, so the cursor
+    -- can rewind context_back_slack chars and still reuse the same warm anchor
+    -- (its [start..cursor] slice stays >= the floor). The floor itself is
+    -- `before`; the pinned request size is before + context_back_slack.
+    local pin = before + math.max(0, vt.context_back_slack or 0)
     -- Ceiling on the suffix so the combined window still leaves the prefix its
-    -- full `before` budget. context_after_chars is sub-linear/capped, so its
-    -- value at the largest prefix we could send (before + growth_slack while
-    -- anchored) is its ceiling.
+    -- full pin budget. context_after_chars is sub-linear/capped, so its value at
+    -- the largest prefix we could send (pin + growth_slack while anchored) is its
+    -- ceiling.
     local after = vt.context_after_chars
     local max_after
     if type(after) == 'function' then
-        max_after = after(before + (vt.context_growth_slack or 0))
+        max_after = after(pin + (vt.context_growth_slack or 0))
     elseif type(after) == 'number' then
         max_after = after
     else
         max_after = math.floor(cfg.context_window * (1 - cfg.context_ratio))
     end
     max_after = math.max(0, math.floor(tonumber(max_after) or 0))
-    local eff_window = before + max_after
+    local eff_window = pin + max_after
     return vim.tbl_extend('force', cfg, {
         context_window = eff_window,
-        context_ratio = before / eff_window,
+        context_ratio = pin / eff_window,
     })
 end
 
@@ -698,6 +703,11 @@ local function trigger(bufnr, overrides, is_retry, is_manual)
     -- there. The ring is only searched past its newest entry when that newest
     -- one fails to anchor, i.e. on a snap, not on every keystroke.
     local growth_slack = (cfg.virtualtext or {}).context_growth_slack or 0
+    -- Backward reuse floor: a rewound cursor can keep reusing a truncated
+    -- anchor while the prefix it would send stays at least this many chars.
+    -- Equals the prefix floor (context_before_chars); the pinned request is
+    -- back_slack chars larger, and that difference is the backward headroom.
+    local anchor_floor = (cfg.virtualtext or {}).context_before_chars
     local cmp_context = utils.make_cmp_context()
 
     local context
@@ -709,6 +719,7 @@ local function trigger(bufnr, overrides, is_retry, is_manual)
                     prev_lines_before = snap.lines_before,
                     prev_lines_after = snap.lines_after,
                     growth_slack = growth_slack,
+                    floor = snap.is_incomplete_before and type(anchor_floor) == 'number' and anchor_floor or nil,
                 })
                 if cand.opts.anchored then
                     context = cand
@@ -810,6 +821,7 @@ local function trigger(bufnr, overrides, is_retry, is_manual)
             params = params,
             lines_before = cur_before,
             lines_after = cur_after,
+            is_incomplete_before = context.opts.is_incomplete_before,
         })
         local max_anchors = (cfg.virtualtext or {}).max_anchors or 8
         while #ctx.anchors > max_anchors do

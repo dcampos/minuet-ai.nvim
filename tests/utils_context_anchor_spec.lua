@@ -11,6 +11,16 @@ local function chars_of(n, ch)
     return string.rep(ch or 'x', n)
 end
 
+local function indexed_chars(n)
+    local chunks = {}
+    local i = 1
+    while #table.concat(chunks) < n do
+        table.insert(chunks, ('%04d'):format(i))
+        i = i + 1
+    end
+    return table.concat(chunks):sub(1, n)
+end
+
 -- Build a buffer where the cursor sits at the very end of a single long line
 -- composed of `before` filler chars + a fixed tail, then a newline and
 -- `after` filler chars on the next line. Returns (bufnr, utils) so the test
@@ -354,6 +364,67 @@ return {
             local context = utils.get_context(utils.make_cmp_context(), nil, anchor)
             helpers.expect_falsy(context.opts.anchored)
             helpers.expect_truthy(context.lines_before:find('TITLE_INSERTED_ABOVE', 1, true) ~= nil)
+
+            helpers.delete_buffer(bufnr)
+        end,
+    },
+
+    {
+        name = 'utils.get_context reuses a warm anchor when the cursor rewinds within the floor',
+        run = function()
+            helpers.setup_root_config {
+                context_window = 120,
+                context_ratio = 100 / 120,
+            }
+            local utils = helpers.reload 'minuet.utils'
+            local bufnr = helpers.create_buffer({ indexed_chars(700), indexed_chars(200) }, { 1, 450 })
+
+            local baseline = utils.get_context(utils.make_cmp_context())
+            helpers.expect_equal(vim.fn.strchars(baseline.lines_before), 100)
+            helpers.expect_truthy(baseline.opts.is_incomplete_before)
+
+            vim.api.nvim_win_set_cursor(0, { 1, 410 })
+            local context = utils.get_context(utils.make_cmp_context(), nil, {
+                prev_lines_before = baseline.lines_before,
+                prev_lines_after = baseline.lines_after,
+                growth_slack = 200,
+                floor = 60,
+            })
+
+            helpers.expect_truthy(context.opts.anchored, 'rewind within floor should reuse the anchor')
+            helpers.expect_truthy(context.opts.suffix_fresh, 'rewind rebuilds the stale suffix')
+            helpers.expect_equal(vim.fn.strchars(context.lines_before), 60)
+            helpers.expect_equal(
+                baseline.lines_before:sub(1, #context.lines_before),
+                context.lines_before,
+                'rewound prefix keeps the same anchor start'
+            )
+
+            helpers.delete_buffer(bufnr)
+        end,
+    },
+
+    {
+        name = 'utils.get_context does not reuse a rewound anchor below the floor',
+        run = function()
+            helpers.setup_root_config {
+                context_window = 120,
+                context_ratio = 100 / 120,
+            }
+            local utils = helpers.reload 'minuet.utils'
+            local bufnr = helpers.create_buffer({ indexed_chars(700), indexed_chars(200) }, { 1, 450 })
+
+            local baseline = utils.get_context(utils.make_cmp_context())
+            vim.api.nvim_win_set_cursor(0, { 1, 409 })
+            local context = utils.get_context(utils.make_cmp_context(), nil, {
+                prev_lines_before = baseline.lines_before,
+                prev_lines_after = baseline.lines_after,
+                growth_slack = 200,
+                floor = 60,
+            })
+
+            helpers.expect_falsy(context.opts.anchored, 'rewind below floor should re-pin fresh')
+            helpers.expect_equal(vim.fn.strchars(context.lines_before), 100)
 
             helpers.delete_buffer(bufnr)
         end,

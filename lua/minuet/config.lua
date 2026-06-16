@@ -312,6 +312,16 @@ local M = {
         -- `context_growth_slack` chars past this. nil keeps the legacy combined
         -- budget. virtualtext (FIM) only; cmp / lsp / blink are unaffected.
         context_before_chars = nil,
+        -- Backward headroom for the edit -> jump-back -> edit pattern. We pin
+        -- (fetch and send) this many chars of prefix BEYOND context_before_chars,
+        -- so the cursor can rewind up to this far and still reuse the same warm
+        -- anchor -- the slice we send keeps its start byte and stays >=
+        -- context_before_chars chars, a partial server-cache hit instead of a
+        -- cold re-pin. The request prefix is therefore context_before_chars +
+        -- context_back_slack (e.g. 16000 + 8000 = 24000). The extra prefix is
+        -- almost always cached, so it is cheap. Requires context_before_chars; 0
+        -- disables backward reuse (only forward typing keeps the anchor warm).
+        context_back_slack = 0,
         -- Suffix (after-cursor) size control for FIM requests. The prefix grows
         -- and stays warm on the server's KV cache via the anchor, but the
         -- suffix is rarely cached (it shifts as the prefix grows), so every

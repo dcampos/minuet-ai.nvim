@@ -290,42 +290,80 @@ end
 ---@param raw_before string  buffer text up to cursor (fetched with extra slack)
 ---@param prev_pre string  lines_before from the previous request
 ---@param growth_slack integer max chars of new text past the anchor
+---@param floor? integer when the cursor has moved BACK into the anchored prefix
+---  (prev_pre longer than raw_before), reuse the anchor by sending its leading
+---  [start..cursor] slice as long as that slice is still at least `floor` chars.
+---  This is the backward headroom that lets an edit -> jump-back -> edit loop
+---  keep hitting the same warm prefix start instead of cold re-pinning. nil/0
+---  disables backward reuse (forward-only, the historical behavior).
 ---@return string?
-local function extend_prefix_anchor(raw_before, prev_pre, growth_slack)
+local function extend_prefix_anchor(raw_before, prev_pre, growth_slack, floor)
     if type(prev_pre) ~= 'string' or prev_pre == '' then
         return nil
     end
     local prev_blen = #prev_pre
     local raw_blen = #raw_before
-    if prev_blen > raw_blen then
-        return nil
-    end
 
-    -- Earliest byte position the match could start while still keeping
-    -- typed_since within slack (worst case 4 bytes/char for UTF-8).
-    local earliest = raw_blen - prev_blen + 1 - growth_slack * 4
-    if earliest < 1 then
-        earliest = 1
-    end
-
-    local best
-    local pos = earliest
-    while true do
-        local found = raw_before:find(prev_pre, pos, true)
-        if not found then
-            break
+    -- Forward: the anchored prefix still sits within raw_before (cursor at or
+    -- past the anchored end). Find its latest occurrence whose typed-since tail
+    -- is within slack, and grow from there. Only possible when prev_pre fits.
+    if prev_blen <= raw_blen then
+        -- Earliest byte position the match could start while still keeping
+        -- typed_since within slack (worst case 4 bytes/char for UTF-8).
+        local earliest = raw_blen - prev_blen + 1 - growth_slack * 4
+        if earliest < 1 then
+            earliest = 1
         end
-        local tail = raw_before:sub(found + prev_blen)
-        local typed_since = vim.fn.strchars(tail)
-        if typed_since <= growth_slack then
-            best = found
+        local best
+        local pos = earliest
+        while true do
+            local found = raw_before:find(prev_pre, pos, true)
+            if not found then
+                break
+            end
+            local tail = raw_before:sub(found + prev_blen)
+            if vim.fn.strchars(tail) <= growth_slack then
+                best = found
+            end
+            pos = found + 1
         end
-        pos = found + 1
+        if best then
+            return raw_before:sub(best)
+        end
     end
 
-    if best then
-        return raw_before:sub(best)
+    -- Backward: the cursor moved back into the anchored prefix, so prev_pre now
+    -- extends past the cursor and the forward search above missed (note this is
+    -- decided by content, not length -- raw_before is fetched with slack and can
+    -- be longer than prev_pre even while the cursor sits behind it). Reuse the
+    -- longest prefix of prev_pre that is still a suffix of raw_before (same start
+    -- byte -> warm), provided that slice clears `floor` chars.
+    if type(floor) == 'number' and floor > 0 then
+        -- Locate the anchor start in raw_before by its leading bytes. Cap the
+        -- probe at the floor so it never reaches past the cursor (any reusable
+        -- overlap is at least `floor` long, so a floor-bounded probe fits).
+        local probe = prev_pre:sub(1, math.max(1, math.min(64, floor)))
+        local best_k
+        local pos = 1
+        while true do
+            local found = raw_before:find(probe, pos, true)
+            if not found then
+                break
+            end
+            -- k bytes of prev_pre would line up with raw_before[found..end].
+            local k = raw_blen - found + 1
+            if k <= prev_blen and prev_pre:sub(1, k) == raw_before:sub(found) then
+                if vim.fn.strchars(prev_pre:sub(1, k)) >= floor then
+                    best_k = math.max(best_k or 0, k)
+                end
+            end
+            pos = found + 1
+        end
+        if best_k then
+            return prev_pre:sub(1, best_k)
+        end
     end
+
     return nil
 end
 
@@ -426,8 +464,15 @@ function M.get_context(cmp_context, cfg, anchor)
     --     whole prefix; for SPM it gains nothing but never hurts correctness,
     --     since the window we send is always a valid prefix/suffix of the live
     --     buffer.
-    if prefix_would_slide and anchor and anchor.prev_lines_before then
-        local pre = extend_prefix_anchor(raw_before, anchor.prev_lines_before, growth_slack)
+    -- Forward reuse needs the prefix to be sliding (a fresh window would shed
+    -- leading tokens). Backward reuse engages on a lower bar -- the cursor only
+    -- needs enough before-text to clear the anchor's floor -- since that case is
+    -- precisely when a fresh window would NOT slide yet still abandons a warm
+    -- anchor a few words ahead.
+    local anchor_floor = anchor and anchor.floor
+    local can_anchor = prefix_would_slide or (type(anchor_floor) == 'number' and n_chars_before >= anchor_floor)
+    if can_anchor and anchor and anchor.prev_lines_before then
+        local pre = extend_prefix_anchor(raw_before, anchor.prev_lines_before, growth_slack, anchor_floor)
         if pre then
             local suf = anchor.prev_lines_after and pin_suffix_anchor(raw_after, anchor.prev_lines_after)
             if suf then
