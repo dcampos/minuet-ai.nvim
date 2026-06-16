@@ -44,6 +44,7 @@ INCEPTION_API_KEY=... OPENROUTER_API_KEY=... \
 | `inspect_smoke.lua` | Float render/toggle + single-prediction transcript capture. |
 | `inspect_session_smoke.lua` | Multi-prediction session history + result tracking (accepted/dismissed/ignored). |
 | `nes_mercury_edit.lua` | Corrected-tableau live comparison: OpenRouter chat/tool-call NES (`O`) vs direct Inception Mercury Edit 2 native edit endpoint (`M`). |
+| `plot_mark_prompt_repro.lua` | Offline Mercury prompt repro for the Typst `plot(..., mark: none)` workflow; writes exact prompt sections and summary flags under `tmp/`. |
 
 ## Findings (these drove the commits on this branch)
 
@@ -70,8 +71,9 @@ INCEPTION_API_KEY=... OPENROUTER_API_KEY=... \
   default.
 - Mercury Edit 2 integration details:
   - Direct Inception `/v1/edit/completions` works and returns a fenced rewritten
-    editable region; the plugin converts that region back to apply_patch so the
-    existing preview/apply/disposition flow stays unchanged.
+    editable region. The plugin now previews/applies that exact region
+    replacement directly; the apply_patch path is kept only for deprecated
+    chat/tool-call providers.
   - OpenRouter rejected `inception/mercury-edit-2` on `/chat/completions` as an
     invalid model ID in the live probe; `/api/v1/models` currently lists
     `inception/mercury-2` but not `inception/mercury-edit-2`, so the production
