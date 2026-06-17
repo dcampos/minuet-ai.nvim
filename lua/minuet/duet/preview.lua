@@ -4,41 +4,14 @@ local M = {}
 
 M.ns_id = api.nvim_create_namespace 'minuet.duet'
 
-local function mix_channel(value, target, ratio)
-    return math.floor(value + (target - value) * ratio + 0.5)
-end
-
-local function intensify_diff_hl(base_group, channel)
-    local ok, hl = pcall(api.nvim_get_hl, 0, { name = base_group, link = false })
-    if not ok or vim.tbl_isempty(hl) or not hl.bg then
-        return { link = base_group }
-    end
-
-    local bg = hl.bg
-    local r = math.floor(bg / 0x10000) % 0x100
-    local g = math.floor(bg / 0x100) % 0x100
-    local b = bg % 0x100
-    if channel == 'red' then
-        r = mix_channel(r, 0xff, 0.45)
-        g = mix_channel(g, 0x00, 0.30)
-        b = mix_channel(b, 0x00, 0.30)
-    else
-        r = mix_channel(r, 0x00, 0.30)
-        g = mix_channel(g, 0xff, 0.45)
-        b = mix_channel(b, 0x00, 0.30)
-    end
-
-    local out = vim.deepcopy(hl)
-    out.bg = r * 0x10000 + g * 0x100 + b
-    out.bold = true
-    return out
-end
+local LINE_HL_PRIORITY = 100
+local TEXT_HL_PRIORITY = 110
 
 local default_highlights = {
     MinuetDuetAdd = { link = 'DiffAdd' },
-    MinuetDuetAddText = intensify_diff_hl('DiffAdd', 'green'),
+    MinuetDuetAddText = { bg = 0x2f6f54 },
     MinuetDuetDelete = { link = 'DiffDelete' },
-    MinuetDuetDeleteText = intensify_diff_hl('DiffDelete', 'red'),
+    MinuetDuetDeleteText = { bg = 0x7a3348 },
     MinuetDuetComment = { link = 'Comment' },
     MinuetDuetCursor = { link = 'IncSearch' },
 }
@@ -451,6 +424,7 @@ local function render_deleted_line_spans(bufnr, state, row, old_line, new_line)
             add_extmark(bufnr, state, row, {
                 end_col = group.old_end_col,
                 hl_group = 'MinuetDuetDeleteText',
+                priority = TEXT_HL_PRIORITY,
             }, group.old_start_col)
         end
     end
@@ -483,6 +457,7 @@ local function render_virtual_lines_hunk(bufnr, state, hunk, cursor_char)
 
         add_extmark(bufnr, state, buffer_row, {
             line_hl_group = 'MinuetDuetDelete',
+            priority = LINE_HL_PRIORITY,
         })
 
         if offset < pair_count then

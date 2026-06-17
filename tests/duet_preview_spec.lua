@@ -358,11 +358,14 @@ return {
             local second_old_col = old_line:find('16', 1, true) - 1
             helpers.expect_equal(#extmarks, 4)
             helpers.expect_equal(line_mark[4].line_hl_group, 'MinuetDuetDelete')
+            helpers.expect_equal(line_mark[4].priority, 100)
             helpers.expect_equal(#deleted_spans, 2)
             helpers.expect_equal(deleted_spans[1][3], first_old_col)
             helpers.expect_equal(deleted_spans[1][4].end_col, first_old_col + #'13')
+            helpers.expect_equal(deleted_spans[1][4].priority, 110)
             helpers.expect_equal(deleted_spans[2][3], second_old_col)
             helpers.expect_equal(deleted_spans[2][4].end_col, second_old_col + #'16')
+            helpers.expect_equal(deleted_spans[2][4].priority, 110)
             helpers.expect_equal(virt_mark[4].virt_lines, {
                 {
                     { [[content_suffix = "\n" + "\n".join(lines[]], 'MinuetDuetAdd' },
