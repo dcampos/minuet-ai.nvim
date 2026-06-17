@@ -1174,6 +1174,29 @@ local function slide_cache_after_accept(ctx, accepted)
     end
 end
 
+-- Slide the per-state locks forward by `accepted`, the lock-ring analogue of
+-- slide_cache_after_accept. The completion the user just partially accepted is
+-- re-anchored at the new (post-accept) state with the accepted head stripped,
+-- so its remainder stays priority #1 -- re-shown over the natural ranking as
+-- background top-ups land or the user types on into it -- instead of being left
+-- behind at the pre-accept state, where the windowed prefix eventually slides
+-- past lines_before and compatible_lock stops matching (the mid-accept rug
+-- pull). lines_after is untouched (an insert at the cursor leaves the suffix).
+-- Same forward-anchoring trick as the cache slide: a growing lines_before stays
+-- matchable via the incomplete-before branch of prefix_typed_since. Locks for a
+-- different family, or fully consumed by this accept, are left as-is.
+local function slide_locks_after_accept(ctx, accepted)
+    if not ctx.locks or #accepted == 0 then
+        return
+    end
+    for _, lock in ipairs(ctx.locks) do
+        if #lock.completion > #accepted and lock.completion:sub(1, #accepted) == accepted then
+            lock.completion = lock.completion:sub(#accepted + 1)
+            lock.lines_before = lock.lines_before .. accepted
+        end
+    end
+end
+
 -- Slice ctx.suggestions forward by `accepted`, preserving the index of the
 -- active suggestion so cycling continues from the same spot. Siblings that
 -- don't start with `accepted` are dropped — they belong to a different family
@@ -1237,6 +1260,7 @@ local function accept_n_chars(n_chars)
         api.nvim_win_set_cursor(0, { line + #lines, new_col })
         slide_cache_after_accept(ctx, to_insert)
         if has_remaining then
+            slide_locks_after_accept(ctx, to_insert)
             slice_suggestions_after_accept(ctx, to_insert)
             update_preview(ctx)
         else
