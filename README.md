@@ -861,8 +861,11 @@ default_config = {
     -- Codestral-only FIM fix. Codestral prepends a spurious leading newline to
     -- its completion when the cursor is at the start of a fresh line (the prefix
     -- ends in a newline) and the suffix is empty or only newlines, inserting a
-    -- blank line. When true (default) that one leading newline is stripped.
-    -- Applies to the codestral provider on FIM only; set false to disable.
+    -- blank line. When true (default), in that window the one leading newline is
+    -- stripped from the response and a '\n' stop sequence is widened to '\n\n'
+    -- for the request (otherwise the spurious newline trips a '\n' stop and
+    -- returns nothing). Applies to the codestral provider on FIM only; set false
+    -- to disable.
     codestral_strip_spurious_newline = true,
     -- proxy port to use
     proxy = nil,

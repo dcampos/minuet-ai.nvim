@@ -463,9 +463,12 @@ local M = {
     -- newline to its completion when the cursor sits at the start of a fresh
     -- line (the prefix ends in a newline) and the suffix is empty or only
     -- newlines: with no right-context it re-emits a line break that is already
-    -- there, inserting a blank line. When true (default) we strip that one
-    -- leading newline. Applies to the codestral provider on FIM only; set false
-    -- to disable. See scripts/probe_codestral_*newline*.py for the analysis.
+    -- there, inserting a blank line. When true (default), in that window we (1)
+    -- strip the one spurious leading newline from the response, and (2) widen a
+    -- '\n' stop sequence to '\n\n' for the request, since the spurious newline
+    -- would otherwise trip a '\n' stop immediately and return nothing. Applies
+    -- to the codestral provider on FIM only; set false to disable. See
+    -- scripts/probe_codestral_*newline*.py for the analysis.
     codestral_strip_spurious_newline = true,
     proxy = nil,
 }

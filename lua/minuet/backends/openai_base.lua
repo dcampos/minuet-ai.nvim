@@ -162,6 +162,16 @@ function M.complete_openai_fim_base(options, get_text_fn, context, callback, cfg
     data.suffix = options.template.suffix and options.template.suffix(context_before_cursor, context_after_cursor, opts)
         or nil
 
+    -- Codestral-only: in the spurious-leading-newline window a '\n' stop would
+    -- trip on the model's spurious first newline and return nothing, so widen it
+    -- to '\n\n' for this request (the leading newline is stripped on the way
+    -- out). Gated to codestral via options.strip_spurious_leading_newline.
+    local in_newline_quirk = options.strip_spurious_leading_newline
+        and utils.is_codestral_spurious_newline_setting(data.prompt, data.suffix)
+    if in_newline_quirk then
+        data.stop = utils.widen_codestral_newline_stop(data.stop)
+    end
+
     local end_point = options.end_point
     local headers = {
         ['Content-Type'] = 'application/json',

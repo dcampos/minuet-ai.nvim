@@ -648,12 +648,25 @@ end
 -- sits at the start of a fresh line (the prefix ends in '\n') and the suffix
 -- carries no real content (empty, or only newlines). With no right-context to
 -- locate the cursor it re-emits the line break it cannot see is already there,
--- inserting a blank line. We strip exactly one leading newline in that case.
--- Any non-newline character in the suffix restores the model's ability to place
--- the break correctly, so the completion is then left untouched. The leading
--- newline is the argmax token here, so sampling does not dislodge it; the
--- reproduction and temperature/top_p analysis live in
--- scripts/probe_codestral_*newline*.py.
+-- inserting a blank line. Any non-newline character in the suffix restores the
+-- model's ability to place the break correctly. The leading newline is the
+-- argmax token here, so sampling does not dislodge it; the reproduction and the
+-- temperature/top_p analysis live in scripts/probe_codestral_*newline*.py. This
+-- predicate identifies that window; callers strip the leading newline from the
+-- response and widen any single-newline stop sequence (below).
+---@param prompt string? FIM prefix (before cursor) sent to the model
+---@param suffix string? FIM suffix (after cursor) sent to the model
+---@return boolean
+function M.is_codestral_spurious_newline_setting(prompt, suffix)
+    if type(prompt) ~= 'string' or prompt:sub(-1) ~= '\n' then
+        return false
+    end
+    -- suffix is "no real content" when it is nil/empty or made only of newlines
+    return suffix == nil or not suffix:find '[^\n]'
+end
+
+--- Strip exactly one spurious leading newline from a completion when it was
+--- produced in the quirk window (see is_codestral_spurious_newline_setting).
 ---@param text string? completion text from the model
 ---@param prompt string? FIM prefix (before cursor) sent to the model
 ---@param suffix string? FIM suffix (after cursor) sent to the model
@@ -662,14 +675,33 @@ function M.strip_codestral_spurious_newline(text, prompt, suffix)
     if type(text) ~= 'string' or text:sub(1, 1) ~= '\n' then
         return text
     end
-    if type(prompt) ~= 'string' or prompt:sub(-1) ~= '\n' then
-        return text
-    end
-    -- suffix is "no real content" when it is nil/empty or made only of newlines
-    if suffix ~= nil and suffix:find '[^\n]' then
+    if not M.is_codestral_spurious_newline_setting(prompt, suffix) then
         return text
     end
     return text:sub(2)
+end
+
+--- Widen a single-newline stop sequence to a double newline. In the quirk
+--- window the model emits a spurious '\n' as its first token; a '\n' stop trips
+--- on it before any real content, returning an empty completion. Bumping to
+--- '\n\n' lets that one newline pass so the real content is produced (and then
+--- stripped). Accepts a stop given as a string or a list of strings; other stop
+--- values pass through untouched. Apply only in the quirk window so the normal
+--- single-line behavior of a '\n' stop is preserved elsewhere.
+---@param stop string|string[]|nil
+---@return string|string[]|nil
+function M.widen_codestral_newline_stop(stop)
+    if stop == '\n' then
+        return '\n\n'
+    end
+    if type(stop) == 'table' then
+        local widened = {}
+        for i, s in ipairs(stop) do
+            widened[i] = (s == '\n') and '\n\n' or s
+        end
+        return widened
+    end
+    return stop
 end
 
 -- Find the longest string that is a prefix of A and a suffix of B. The
