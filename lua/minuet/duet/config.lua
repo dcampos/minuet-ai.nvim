@@ -305,7 +305,7 @@ end
 ---@field editable_region minuet.DuetEditableRegion
 ---@field non_editable_region minuet.DuetNonEditableRegion
 ---@field markers { editable_region_start: string, editable_region_end: string, cursor_position: string }
----@field preview { cursor: string }
+---@field preview { mode: string, cursor: string }
 ---@field provider_options table<string, table>
 local M = {
     -- NES (apply_patch) is the active duet design; default to gpt-oss via OpenRouter.
@@ -323,6 +323,7 @@ local M = {
     },
     markers = vim.deepcopy(default_markers),
     preview = {
+        mode = 'inline',
         cursor = '\u{f246}',
     },
     -- NES session settings (apply_patch flow). See duet-nes-spec.md.

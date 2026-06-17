@@ -4,16 +4,48 @@ local M = {}
 
 M.ns_id = api.nvim_create_namespace 'minuet.duet'
 
+local function mix_channel(value, target, ratio)
+    return math.floor(value + (target - value) * ratio + 0.5)
+end
+
+local function intensify_diff_hl(base_group, channel)
+    local ok, hl = pcall(api.nvim_get_hl, 0, { name = base_group, link = false })
+    if not ok or vim.tbl_isempty(hl) or not hl.bg then
+        return { link = base_group }
+    end
+
+    local bg = hl.bg
+    local r = math.floor(bg / 0x10000) % 0x100
+    local g = math.floor(bg / 0x100) % 0x100
+    local b = bg % 0x100
+    if channel == 'red' then
+        r = mix_channel(r, 0xff, 0.45)
+        g = mix_channel(g, 0x00, 0.30)
+        b = mix_channel(b, 0x00, 0.30)
+    else
+        r = mix_channel(r, 0x00, 0.30)
+        g = mix_channel(g, 0xff, 0.45)
+        b = mix_channel(b, 0x00, 0.30)
+    end
+
+    local out = vim.deepcopy(hl)
+    out.bg = r * 0x10000 + g * 0x100 + b
+    out.bold = true
+    return out
+end
+
 local default_highlights = {
-    MinuetDuetAdd = 'DiffAdd',
-    MinuetDuetDelete = 'DiffDelete',
-    MinuetDuetComment = 'Comment',
-    MinuetDuetCursor = 'IncSearch',
+    MinuetDuetAdd = { link = 'DiffAdd' },
+    MinuetDuetAddText = intensify_diff_hl('DiffAdd', 'green'),
+    MinuetDuetDelete = { link = 'DiffDelete' },
+    MinuetDuetDeleteText = intensify_diff_hl('DiffDelete', 'red'),
+    MinuetDuetComment = { link = 'Comment' },
+    MinuetDuetCursor = { link = 'IncSearch' },
 }
 
-for hl_group, default_link in pairs(default_highlights) do
+for hl_group, default_hl in pairs(default_highlights) do
     if vim.tbl_isempty(api.nvim_get_hl(0, { name = hl_group })) then
-        api.nvim_set_hl(0, hl_group, { link = default_link })
+        api.nvim_set_hl(0, hl_group, default_hl)
     end
 end
 
@@ -89,6 +121,9 @@ local function preview_mode(config)
     local mode = ((config.preview or {}).mode or 'inline')
     if mode == 'side-to-side' or mode == 'side_by_side' or mode == 'side-by-side' then
         return 'side_by_side'
+    end
+    if mode == 'virtual' or mode == 'virtual_lines' or mode == 'virtual-lines' then
+        return 'virtual_lines'
     end
     return 'inline'
 end
@@ -231,6 +266,7 @@ local function word_diff_groups(old_line, new_line)
         local old_start_col = old_idx <= old_last and old_tokens[old_idx].start_col or nil
         local old_end_col = old_idx <= old_last and old_tokens[old_last].end_col or nil
         local new_start_col = new_idx <= new_last and new_tokens[new_idx].start_col or nil
+        local new_end_col = new_idx <= new_last and new_tokens[new_last].end_col or nil
         local insert_col = gap_col(old_tokens, old_idx, #old_line)
 
         table.insert(groups, {
@@ -239,6 +275,7 @@ local function word_diff_groups(old_line, new_line)
             old_start_col = old_start_col,
             old_end_col = old_end_col,
             new_start_col = new_start_col,
+            new_end_col = new_end_col,
             insert_col = insert_col,
         })
     end
@@ -340,11 +377,173 @@ local function render_inserted_lines(bufnr, state, row, lines, proposed_indices,
     })
 end
 
+local function push_chunk(chunks, text, hl_group)
+    if #text > 0 then
+        table.insert(chunks, { text, hl_group })
+    end
+end
+
+local function push_chunk_range(chunks, text, start_col, end_col, hl_group, cursor_col, cursor_char)
+    if cursor_col and cursor_col >= start_col and cursor_col <= end_col and start_col < end_col then
+        push_chunk(chunks, text:sub(start_col + 1, cursor_col), hl_group)
+        table.insert(chunks, { cursor_char, 'MinuetDuetCursor' })
+        push_chunk(chunks, text:sub(cursor_col + 1, end_col), hl_group)
+        return true
+    end
+
+    push_chunk(chunks, text:sub(start_col + 1, end_col), hl_group)
+    return false
+end
+
+---@param spans { start_col: integer, end_col: integer, hl_group: string }[]
+local function make_span_chunks(text, base_hl_group, spans, cursor_col, cursor_char)
+    local chunks = {}
+    local pos = 0
+    local cursor_rendered = false
+
+    table.sort(spans, function(a, b)
+        if a.start_col ~= b.start_col then
+            return a.start_col < b.start_col
+        end
+        return a.end_col < b.end_col
+    end)
+
+    for _, span in ipairs(spans) do
+        local start_col = math.max(pos, math.min(span.start_col, #text))
+        local end_col = math.max(start_col, math.min(span.end_col, #text))
+        cursor_rendered = push_chunk_range(chunks, text, pos, start_col, base_hl_group, cursor_col, cursor_char)
+            or cursor_rendered
+        cursor_rendered = push_chunk_range(chunks, text, start_col, end_col, span.hl_group, cursor_col, cursor_char)
+            or cursor_rendered
+        pos = end_col
+    end
+
+    cursor_rendered = push_chunk_range(chunks, text, pos, #text, base_hl_group, cursor_col, cursor_char)
+        or cursor_rendered
+
+    if cursor_col and not cursor_rendered then
+        table.insert(chunks, { cursor_char, 'MinuetDuetCursor' })
+    end
+    if #chunks == 0 then
+        table.insert(chunks, { text, base_hl_group })
+    end
+    return chunks
+end
+
+local function proposed_line_chunks(old_line, new_line, cursor_col, cursor_char)
+    local spans = {}
+    for _, group in ipairs(word_diff_groups(old_line, new_line)) do
+        if group.new_start_col and group.new_end_col and group.new_end_col > group.new_start_col then
+            table.insert(spans, {
+                start_col = group.new_start_col,
+                end_col = group.new_end_col,
+                hl_group = 'MinuetDuetAddText',
+            })
+        end
+    end
+
+    return make_span_chunks(new_line, 'MinuetDuetAdd', spans, cursor_col, cursor_char)
+end
+
+local function render_deleted_line_spans(bufnr, state, row, old_line, new_line)
+    for _, group in ipairs(word_diff_groups(old_line, new_line)) do
+        if group.old_start_col and group.old_end_col and group.old_end_col > group.old_start_col then
+            add_extmark(bufnr, state, row, {
+                end_col = group.old_end_col,
+                hl_group = 'MinuetDuetDeleteText',
+            }, group.old_start_col)
+        end
+    end
+end
+
+local function hunk_insertion_anchor(state, original_start, original_count)
+    local anchor_row = state.range.start_row + original_start - 1 + math.max(original_count - 1, 0)
+    local render_above = false
+
+    if original_count == 0 then
+        anchor_row = state.range.start_row
+        render_above = original_start == 0
+        if original_start > 0 then
+            anchor_row = anchor_row + original_start - 1
+        end
+    end
+
+    return anchor_row, render_above
+end
+
+---@param hunk MinuetDuetHunk
+local function render_virtual_lines_hunk(bufnr, state, hunk, cursor_char)
+    local original_start, original_count, proposed_start, proposed_count = unpack(hunk)
+    local pair_count = math.min(original_count, proposed_count)
+    local first_buffer_row = state.range.start_row + original_start - 1
+
+    for offset = 0, original_count - 1 do
+        local buffer_row = first_buffer_row + offset
+        local old_line = state.original_lines[original_start + offset] or ''
+
+        add_extmark(bufnr, state, buffer_row, {
+            line_hl_group = 'MinuetDuetDelete',
+        })
+
+        if offset < pair_count then
+            local new_line = state.proposed_lines[proposed_start + offset] or ''
+            render_deleted_line_spans(bufnr, state, buffer_row, old_line, new_line)
+        end
+    end
+
+    if proposed_count == 0 then
+        return
+    end
+
+    local virt_lines = {}
+    for offset = 0, proposed_count - 1 do
+        local proposed_idx = proposed_start + offset - 1 -- 0-based index into proposed_lines
+        local new_line = state.proposed_lines[proposed_start + offset] or ''
+        local cursor_col = cursor_col_for(state, proposed_idx)
+
+        if offset < pair_count then
+            local old_line = state.original_lines[original_start + offset] or ''
+            table.insert(virt_lines, proposed_line_chunks(old_line, new_line, cursor_col, cursor_char))
+        else
+            table.insert(virt_lines, make_chunks(new_line, 'MinuetDuetAdd', cursor_col, cursor_char))
+        end
+    end
+
+    local anchor_row, render_above = hunk_insertion_anchor(state, original_start, original_count)
+    add_extmark(bufnr, state, anchor_row, {
+        virt_lines = virt_lines,
+        virt_lines_above = render_above,
+    })
+end
+
+---@param hunks MinuetDuetHunk[]
+---@return MinuetDuetHunk[]
+local function coalesce_virtual_line_hunks(hunks)
+    local out = {}
+    for _, hunk in ipairs(hunks) do
+        local last = out[#out]
+        if last and hunk[1] <= last[1] + last[2] and hunk[3] <= last[3] + last[4] then
+            local original_end = math.max(last[1] + last[2], hunk[1] + hunk[2])
+            local proposed_end = math.max(last[3] + last[4], hunk[3] + hunk[4])
+            last[2] = original_end - last[1]
+            last[4] = proposed_end - last[3]
+        else
+            table.insert(out, { hunk[1], hunk[2], hunk[3], hunk[4] })
+        end
+    end
+    return out
+end
+
 ---@param hunk MinuetDuetHunk
 local function render_hunk(bufnr, state, hunk, cursor_char, mode)
     local original_start, original_count, proposed_start, proposed_count = unpack(hunk)
     local pair_count = math.min(original_count, proposed_count)
     local first_buffer_row = state.range.start_row + original_start - 1
+
+    if mode == 'virtual_lines' then
+        render_virtual_lines_hunk(bufnr, state, hunk, cursor_char)
+        return
+    end
 
     for offset = 0, pair_count - 1 do
         local buffer_row = first_buffer_row + offset
@@ -383,15 +582,7 @@ local function render_hunk(bufnr, state, hunk, cursor_char, mode)
             table.insert(proposed_indices, proposed_start + offset - 1) -- 0-based
         end
 
-        local insertion_anchor_row = first_buffer_row + math.max(original_count - 1, 0)
-        local render_above = original_count == 0 and original_start == 0
-
-        if original_count == 0 then
-            insertion_anchor_row = state.range.start_row
-            if original_start > 0 then
-                insertion_anchor_row = insertion_anchor_row + original_start - 1
-            end
-        end
+        local insertion_anchor_row, render_above = hunk_insertion_anchor(state, original_start, original_count)
 
         render_inserted_lines(
             bufnr,
@@ -471,6 +662,10 @@ function M.render(bufnr, state)
             utils.notify('Minuet duet predicts no text changes.', 'warn', vim.log.levels.WARN)
         end
         return
+    end
+
+    if mode == 'virtual_lines' then
+        hunks = coalesce_virtual_line_hunks(hunks)
     end
 
     for _, hunk in ipairs(hunks) do

@@ -308,4 +308,76 @@ return {
             helpers.delete_buffer(bufnr)
         end,
     },
+    {
+        name = 'duet.preview virtual_lines renders red source lines and green proposed virtual lines',
+        run = function()
+            helpers.setup_root_config {
+                duet = {
+                    preview = {
+                        cursor = '|',
+                        mode = 'virtual_lines',
+                    },
+                },
+            }
+
+            local preview = helpers.reload 'minuet.duet.preview'
+            local old_line = [[content_suffix = "\n" + "\n".join(lines[13:16]) + "\n"]]
+            local new_line = [[content_suffix = "\n" + "\n".join(lines[14:19]) + "\n"]]
+            local inserted_line = [[assert content_suffix.strip(), "content suffix is empty -- doc too short"]]
+            local bufnr = helpers.create_buffer({ old_line }, { 1, 0 })
+            local state = {
+                range = {
+                    start_row = 0,
+                    end_row = 1,
+                },
+                original_lines = { old_line },
+                proposed_lines = { new_line, inserted_line },
+            }
+
+            preview.render(bufnr, state)
+
+            local extmarks = get_extmarks(bufnr, preview.ns_id)
+            local line_mark
+            local virt_mark
+            local deleted_spans = {}
+            for _, extmark in ipairs(extmarks) do
+                local details = extmark[4]
+                if details.line_hl_group then
+                    line_mark = extmark
+                elseif details.virt_lines then
+                    virt_mark = extmark
+                elseif details.hl_group == 'MinuetDuetDeleteText' then
+                    table.insert(deleted_spans, extmark)
+                end
+            end
+            table.sort(deleted_spans, function(a, b)
+                return a[3] < b[3]
+            end)
+
+            local first_old_col = old_line:find('13', 1, true) - 1
+            local second_old_col = old_line:find('16', 1, true) - 1
+            helpers.expect_equal(#extmarks, 4)
+            helpers.expect_equal(line_mark[4].line_hl_group, 'MinuetDuetDelete')
+            helpers.expect_equal(#deleted_spans, 2)
+            helpers.expect_equal(deleted_spans[1][3], first_old_col)
+            helpers.expect_equal(deleted_spans[1][4].end_col, first_old_col + #'13')
+            helpers.expect_equal(deleted_spans[2][3], second_old_col)
+            helpers.expect_equal(deleted_spans[2][4].end_col, second_old_col + #'16')
+            helpers.expect_equal(virt_mark[4].virt_lines, {
+                {
+                    { [[content_suffix = "\n" + "\n".join(lines[]], 'MinuetDuetAdd' },
+                    { '14', 'MinuetDuetAddText' },
+                    { ':', 'MinuetDuetAdd' },
+                    { '19', 'MinuetDuetAddText' },
+                    { ']) + "\\n"', 'MinuetDuetAdd' },
+                },
+                {
+                    { inserted_line, 'MinuetDuetAdd' },
+                },
+            })
+            helpers.expect_equal(virt_mark[4].virt_lines_above, false)
+
+            helpers.delete_buffer(bufnr)
+        end,
+    },
 }
