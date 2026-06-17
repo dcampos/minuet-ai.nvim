@@ -454,11 +454,19 @@ local function render_virtual_lines_hunk(bufnr, state, hunk, cursor_char)
     for offset = 0, original_count - 1 do
         local buffer_row = first_buffer_row + offset
         local old_line = state.original_lines[original_start + offset] or ''
-
-        add_extmark(bufnr, state, buffer_row, {
-            line_hl_group = 'MinuetDuetDelete',
+        local line_hl_opts = {
             priority = LINE_HL_PRIORITY,
-        })
+        }
+
+        if #old_line == 0 then
+            line_hl_opts.line_hl_group = 'MinuetDuetDelete'
+        else
+            line_hl_opts.end_col = #old_line
+            line_hl_opts.hl_eol = true
+            line_hl_opts.hl_group = 'MinuetDuetDelete'
+        end
+
+        add_extmark(bufnr, state, buffer_row, line_hl_opts)
 
         if offset < pair_count then
             local new_line = state.proposed_lines[proposed_start + offset] or ''

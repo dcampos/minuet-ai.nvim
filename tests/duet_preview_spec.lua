@@ -342,7 +342,7 @@ return {
             local deleted_spans = {}
             for _, extmark in ipairs(extmarks) do
                 local details = extmark[4]
-                if details.line_hl_group then
+                if details.hl_group == 'MinuetDuetDelete' then
                     line_mark = extmark
                 elseif details.virt_lines then
                     virt_mark = extmark
@@ -357,7 +357,9 @@ return {
             local first_old_col = old_line:find('13', 1, true) - 1
             local second_old_col = old_line:find('16', 1, true) - 1
             helpers.expect_equal(#extmarks, 4)
-            helpers.expect_equal(line_mark[4].line_hl_group, 'MinuetDuetDelete')
+            helpers.expect_equal(line_mark[4].hl_group, 'MinuetDuetDelete')
+            helpers.expect_equal(line_mark[4].end_col, #old_line)
+            helpers.expect_equal(line_mark[4].hl_eol, true)
             helpers.expect_equal(line_mark[4].priority, 100)
             helpers.expect_equal(#deleted_spans, 2)
             helpers.expect_equal(deleted_spans[1][3], first_old_col)
