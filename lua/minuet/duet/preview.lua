@@ -11,7 +11,7 @@ local default_highlights = {
     MinuetDuetAdd = { link = 'DiffAdd' },
     MinuetDuetAddText = { bg = 0x2f6f54 },
     MinuetDuetDelete = { link = 'DiffDelete' },
-    MinuetDuetDeleteText = { bg = 0x7a3348 },
+    MinuetDuetDeleteText = { bg = 0x9a3f55 },
     MinuetDuetComment = { link = 'Comment' },
     MinuetDuetCursor = { link = 'IncSearch' },
 }
