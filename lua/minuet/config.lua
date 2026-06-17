@@ -459,6 +459,14 @@ local M = {
     -- Disabled by default for FIM providers; enable only if the model
     -- consistently repeats context verbatim.
     fim_filter_context = false,
+    -- Codestral-only FIM fix. Codestral reflexively prepends a spurious leading
+    -- newline to its completion when the cursor sits at the start of a fresh
+    -- line (the prefix ends in a newline) and the suffix is empty or only
+    -- newlines: with no right-context it re-emits a line break that is already
+    -- there, inserting a blank line. When true (default) we strip that one
+    -- leading newline. Applies to the codestral provider on FIM only; set false
+    -- to disable. See scripts/probe_codestral_*newline*.py for the analysis.
+    codestral_strip_spurious_newline = true,
     proxy = nil,
 }
 

@@ -314,6 +314,10 @@ function M.complete_openai_fim_base(options, get_text_fn, context, callback, cfg
                     result = utils.no_stream_decode(out, data_file, options.name, get_text_fn)
                 end
 
+                if options.strip_spurious_leading_newline then
+                    result = utils.strip_codestral_spurious_newline(result, data.prompt, data.suffix)
+                end
+
                 finish_request(idx, result)
             end,
             on_spawn_error = function()

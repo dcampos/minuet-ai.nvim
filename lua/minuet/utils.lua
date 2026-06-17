@@ -644,6 +644,34 @@ function M.remove_spaces(items, keep_leading_newline)
     return new
 end
 
+-- Codestral FIM reflexively prepends a spurious leading newline when the cursor
+-- sits at the start of a fresh line (the prefix ends in '\n') and the suffix
+-- carries no real content (empty, or only newlines). With no right-context to
+-- locate the cursor it re-emits the line break it cannot see is already there,
+-- inserting a blank line. We strip exactly one leading newline in that case.
+-- Any non-newline character in the suffix restores the model's ability to place
+-- the break correctly, so the completion is then left untouched. The leading
+-- newline is the argmax token here, so sampling does not dislodge it; the
+-- reproduction and temperature/top_p analysis live in
+-- scripts/probe_codestral_*newline*.py.
+---@param text string? completion text from the model
+---@param prompt string? FIM prefix (before cursor) sent to the model
+---@param suffix string? FIM suffix (after cursor) sent to the model
+---@return string? text with at most one leading newline stripped
+function M.strip_codestral_spurious_newline(text, prompt, suffix)
+    if type(text) ~= 'string' or text:sub(1, 1) ~= '\n' then
+        return text
+    end
+    if type(prompt) ~= 'string' or prompt:sub(-1) ~= '\n' then
+        return text
+    end
+    -- suffix is "no real content" when it is nil/empty or made only of newlines
+    if suffix ~= nil and suffix:find '[^\n]' then
+        return text
+    end
+    return text:sub(2)
+end
+
 -- Find the longest string that is a prefix of A and a suffix of B. The
 -- function iterates from the longest possible match length downwards for
 -- efficiency.  If A or B are not strings, it returns an empty string.

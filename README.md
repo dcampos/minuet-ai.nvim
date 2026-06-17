@@ -858,6 +858,12 @@ default_config = {
     -- Similar to after_cursor_filter_length but trim the completion item from
     -- prefix instead of suffix.
     before_cursor_filter_length = 2,
+    -- Codestral-only FIM fix. Codestral prepends a spurious leading newline to
+    -- its completion when the cursor is at the start of a fresh line (the prefix
+    -- ends in a newline) and the suffix is empty or only newlines, inserting a
+    -- blank line. When true (default) that one leading newline is stripped.
+    -- Applies to the codestral provider on FIM only; set false to disable.
+    codestral_strip_spurious_newline = true,
     -- proxy port to use
     proxy = nil,
     -- **List** of functions to execute. If any function returns `false`, Minuet
