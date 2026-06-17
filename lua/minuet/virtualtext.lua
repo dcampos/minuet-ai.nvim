@@ -467,9 +467,13 @@ end
 
 -- Provider callbacks capture this token; a *hard* cleanup bumps it so in-flight
 -- callbacks cannot repaint ghost text after an explicit dismiss / insert-leave.
--- Concurrent requests fired while typing share one generation (trigger does NOT
--- bump it), so each still lands its result in the cache and may repaint if it
--- matches the live cursor; only a dismiss invalidates them all at once.
+-- A param-family switch (a non-retry trigger fired with different stop tokens /
+-- model than the active family) also bumps it, so the previous family's
+-- in-flight callbacks stop painting and retrying once the user asks for a
+-- different variant -- otherwise the two families fight over the one display
+-- slot. Concurrent requests of the SAME family fired while typing share one
+-- generation (no bump), so each still lands its result in the cache and may
+-- repaint if it matches the live cursor; a dismiss invalidates them all at once.
 ---@param ctx minuet.VirtualtextSuggestionContext
 ---@return integer
 local function bump_request_generation(ctx)
@@ -685,12 +689,23 @@ local function trigger(bufnr, overrides, is_retry, is_manual)
 
     local ctx = get_ctx(bufnr)
 
-    if not is_retry then
-        ctx.last_trigger_was_manual = is_manual or false
-    end
     ctx.cache = ctx.cache or {}
 
     local params = extract_cache_params(cfg)
+
+    if not is_retry then
+        ctx.last_trigger_was_manual = is_manual or false
+        -- Switching param-families (e.g. pressing the multi-line keymap while
+        -- single-line auto results are showing / still in flight) begins a new
+        -- display lineage. Bump the generation so the previous family's
+        -- in-flight responses still cache their completions but no longer
+        -- repaint or fire retries over the family the user just asked for --
+        -- without this the two families' (streaming) callbacks fight over the
+        -- single display slot and the ghost text flickers between them.
+        if ctx.last_trigger_params ~= nil and not vim.deep_equal(params, ctx.last_trigger_params) then
+            bump_request_generation(ctx)
+        end
+    end
 
     -- Anchor reuse keeps the FIM prompt prefix start byte-identical to a recent
     -- request so the server's KV cache stays warm. We keep a small ring of
