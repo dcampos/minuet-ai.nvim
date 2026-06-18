@@ -1,0 +1,874 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Duet Diff Viewer Failure Cases</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      --bg: #111827;
+      --panel: #182235;
+      --panel-2: #101827;
+      --text: #dbe7ff;
+      --muted: #93a4bf;
+      --border: #2b3a55;
+      --accent: #6fb6ff;
+      --old-bg: #4b2a3d;
+      --old-focus: #9a3f55;
+      --new-bg: #2a4556;
+      --new-focus: #2f6f54;
+      --code-bg: #0d1422;
+      --warn: #f0ba6a;
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    body {
+      margin: 0;
+      background: var(--bg);
+      color: var(--text);
+      font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      font-size: 15px;
+      line-height: 1.45;
+    }
+
+    header {
+      position: sticky;
+      top: 0;
+      z-index: 10;
+      border-bottom: 1px solid var(--border);
+      background: rgba(17, 24, 39, 0.96);
+      backdrop-filter: blur(10px);
+    }
+
+    .wrap {
+      max-width: 1280px;
+      margin: 0 auto;
+      padding: 18px 22px;
+    }
+
+    .topline {
+      display: flex;
+      align-items: flex-start;
+      justify-content: space-between;
+      gap: 18px;
+    }
+
+    h1 {
+      margin: 0;
+      font-size: 22px;
+      font-weight: 700;
+      letter-spacing: 0;
+    }
+
+    .subtitle {
+      margin: 6px 0 0;
+      color: var(--muted);
+      max-width: 900px;
+    }
+
+    .controls {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      margin-top: 16px;
+    }
+
+    button {
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      background: var(--panel);
+      color: var(--text);
+      cursor: pointer;
+      font: inherit;
+      min-height: 34px;
+      padding: 6px 11px;
+    }
+
+    button:hover,
+    button.active {
+      border-color: var(--accent);
+      color: #ffffff;
+    }
+
+    main.wrap {
+      display: grid;
+      grid-template-columns: 280px minmax(0, 1fr);
+      gap: 18px;
+      align-items: start;
+    }
+
+    aside {
+      position: sticky;
+      top: 116px;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      background: var(--panel);
+      padding: 14px;
+    }
+
+    aside h2 {
+      margin: 0 0 8px;
+      font-size: 14px;
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
+      color: var(--accent);
+    }
+
+    aside p,
+    aside li {
+      color: var(--muted);
+      font-size: 13px;
+    }
+
+    aside ul {
+      margin: 8px 0 0;
+      padding-left: 18px;
+    }
+
+    .legend {
+      display: grid;
+      gap: 8px;
+      margin-top: 14px;
+    }
+
+    .legend-row {
+      display: grid;
+      grid-template-columns: 18px 1fr;
+      gap: 8px;
+      align-items: center;
+      color: var(--muted);
+      font-size: 13px;
+    }
+
+    .swatch {
+      height: 16px;
+      border-radius: 3px;
+      border: 1px solid rgba(255, 255, 255, 0.16);
+    }
+
+    .old-line-bg { background: var(--old-bg); }
+    .old-focus-bg { background: var(--old-focus); }
+    .new-line-bg { background: var(--new-bg); }
+    .new-focus-bg { background: var(--new-focus); }
+
+    #cases {
+      display: grid;
+      gap: 16px;
+      min-width: 0;
+    }
+
+    .case-card {
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      background: var(--panel);
+      overflow: hidden;
+    }
+
+    .case-head {
+      display: flex;
+      align-items: flex-start;
+      justify-content: space-between;
+      gap: 12px;
+      padding: 14px 16px;
+      border-bottom: 1px solid var(--border);
+      background: var(--panel-2);
+    }
+
+    .case-title {
+      margin: 0;
+      font-size: 16px;
+      font-weight: 700;
+      letter-spacing: 0;
+    }
+
+    .case-meta {
+      margin-top: 5px;
+      color: var(--muted);
+      font-size: 13px;
+    }
+
+    .pill {
+      border: 1px solid var(--border);
+      border-radius: 999px;
+      color: var(--accent);
+      font-size: 12px;
+      padding: 4px 8px;
+      white-space: nowrap;
+    }
+
+    .case-body {
+      padding: 14px 16px 16px;
+    }
+
+    .note-grid {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+      gap: 12px;
+      margin-bottom: 12px;
+    }
+
+    .note {
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      background: rgba(13, 20, 34, 0.65);
+      padding: 10px;
+      color: var(--muted);
+      min-width: 0;
+    }
+
+    .note strong {
+      display: block;
+      color: var(--text);
+      margin-bottom: 4px;
+      font-size: 13px;
+    }
+
+    .viewer {
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      overflow: hidden;
+      background: var(--code-bg);
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+      font-size: 14px;
+    }
+
+    .viewer-row {
+      display: grid;
+      grid-template-columns: 58px minmax(0, 1fr);
+      min-height: 28px;
+    }
+
+    .viewer-label {
+      border-right: 1px solid rgba(255, 255, 255, 0.08);
+      color: #91a1bd;
+      padding: 5px 8px;
+      text-align: right;
+      background: rgba(255, 255, 255, 0.035);
+      user-select: none;
+    }
+
+    .code-line {
+      white-space: pre;
+      overflow-x: auto;
+      padding: 5px 9px;
+    }
+
+    .old .code-line {
+      background: var(--old-bg);
+    }
+
+    .new .code-line {
+      background: var(--new-bg);
+    }
+
+    .focus-old {
+      background: var(--old-focus);
+      color: #ffe8ef;
+    }
+
+    .focus-new {
+      background: var(--new-focus);
+      color: #e7fff2;
+    }
+
+    details {
+      margin-top: 12px;
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      background: rgba(13, 20, 34, 0.55);
+    }
+
+    summary {
+      cursor: pointer;
+      padding: 9px 10px;
+      color: var(--muted);
+    }
+
+    .token-dump {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+      gap: 10px;
+      padding: 0 10px 10px;
+    }
+
+    .token-panel {
+      min-width: 0;
+    }
+
+    .token-panel h4 {
+      margin: 0 0 6px;
+      color: var(--text);
+      font-size: 12px;
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
+    }
+
+    .token-list {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 5px;
+    }
+
+    .token {
+      border: 1px solid var(--border);
+      border-radius: 5px;
+      padding: 2px 5px;
+      color: var(--muted);
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+      font-size: 12px;
+      max-width: 100%;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
+    .hidden {
+      display: none;
+    }
+
+    @media (max-width: 900px) {
+      main.wrap {
+        grid-template-columns: 1fr;
+      }
+
+      aside {
+        position: static;
+      }
+
+      .note-grid,
+      .token-dump {
+        grid-template-columns: 1fr;
+      }
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <div class="wrap">
+      <div class="topline">
+        <div>
+          <h1>Duet Diff Viewer Failure Cases</h1>
+          <p class="subtitle">
+            Static visualization of the current Lua virtual-lines viewer logic.
+            Each sample is treated as one coalesced hunk, then old/new lines are
+            paired by position and token-LCS focus spans are drawn inside paired lines.
+          </p>
+        </div>
+        <span class="pill" id="case-count"></span>
+      </div>
+      <div class="controls" id="filters">
+        <button type="button" data-filter="all" class="active">All</button>
+        <button type="button" data-filter="1">1-line hunks</button>
+        <button type="button" data-filter="2">2-line hunks</button>
+        <button type="button" data-filter="3">3-line hunks</button>
+        <button type="button" data-filter="5">5-line hunks</button>
+      </div>
+    </div>
+  </header>
+
+  <main class="wrap">
+    <aside>
+      <h2>Algorithm Modeled</h2>
+      <p>
+        This page mirrors the current intraline logic in
+        <code>lua/minuet/duet/preview.lua</code>.
+      </p>
+      <ul>
+        <li>Whitespace runs are tokens.</li>
+        <li>ASCII word and underscore runs are tokens.</li>
+        <li>Punctuation is one token per character.</li>
+        <li>LCS matches are anchors.</li>
+        <li>Unmatched token ranges become focus spans.</li>
+      </ul>
+      <div class="legend">
+        <div class="legend-row"><span class="swatch old-line-bg"></span><span>Old line base</span></div>
+        <div class="legend-row"><span class="swatch old-focus-bg"></span><span>Old focus span</span></div>
+        <div class="legend-row"><span class="swatch new-line-bg"></span><span>New line base</span></div>
+        <div class="legend-row"><span class="swatch new-focus-bg"></span><span>New focus span</span></div>
+      </div>
+      <p>
+        The point is to expose where the current simple algorithm is misleading,
+        not to show ideal diffs.
+      </p>
+    </aside>
+
+    <section id="cases" aria-live="polite"></section>
+  </main>
+
+  <script>
+    const cases = [
+      {
+        size: 1,
+        title: "CamelCase subword rename",
+        old: ["local id = getUserId(user)"],
+        next: ["local id = getUserName(user)"],
+        problem: "The whole identifier is one token, so the focus span covers getUserId/getUserName instead of just Id -> Name.",
+        better: "A code-aware tokenizer would split camelCase or run a secondary character diff inside changed identifiers."
+      },
+      {
+        size: 1,
+        title: "snake_case partial rename",
+        old: ["user_id = row.user_id"],
+        next: ["user_name = row.user_name"],
+        problem: "Underscore belongs to the word token, so user_id and user_name are highlighted as whole tokens.",
+        better: "Split identifiers into subwords for focus spans, while still keeping the full identifier as a semantic token."
+      },
+      {
+        size: 1,
+        title: "Numeric literal with stable prefix and suffix",
+        old: ["timeout_ms = 10_000"],
+        next: ["timeout_ms = 15_000"],
+        problem: "The entire number literal is a single word token. The actual meaningful change is the middle digit.",
+        better: "Tokenize number literals separately, then optionally character-diff within changed number tokens."
+      },
+      {
+        size: 1,
+        title: "Whitespace-only formatting noise",
+        old: ["return call(a,b,c)"],
+        next: ["return call(a, b, c)"],
+        problem: "Whitespace runs are tokens, so tiny inserted spaces are focus spans. This can be visually noisy.",
+        better: "Make whitespace-only focus spans optional, or down-rank them when no semantic tokens changed."
+      },
+      {
+        size: 2,
+        title: "Inserted line shifts a two-line hunk",
+        old: [
+          "foo(1)",
+          "bar(2)"
+        ],
+        next: [
+          "log()",
+          "foo(1)",
+          "bar(3)"
+        ],
+        problem: "The renderer pairs old line 1 with new line 1 and old line 2 with new line 2. That makes log() look like a replacement for foo(1).",
+        better: "Pair lines by similarity inside the hunk before running intraline token diff."
+      },
+      {
+        size: 2,
+        title: "Two adjacent assignments cross over",
+        old: [
+          "left = source.left",
+          "right = source.right"
+        ],
+        next: [
+          "left = source.right",
+          "right = source.left"
+        ],
+        problem: "The local spans show two replacements, but the visual does not communicate that values were swapped.",
+        better: "Move-aware or repeated-token-aware matching could annotate this as a swap rather than two unrelated edits."
+      },
+      {
+        size: 2,
+        title: "One real edit plus one inserted guard",
+        old: [
+          "if enabled then",
+          "  run_task()"
+        ],
+        next: [
+          "if enabled and ready then",
+          "  log_task()",
+          "  run_task()"
+        ],
+        problem: "The inserted logging line gets paired with run_task(), so the unchanged run_task() appears to be deleted and replaced.",
+        better: "Line similarity should identify run_task() as preserved and log_task() as inserted."
+      },
+      {
+        size: 3,
+        title: "Reordered arguments on a continuation line",
+        old: [
+          "plot(",
+          "  x, y, color,",
+          ")"
+        ],
+        next: [
+          "plot(",
+          "  color, y, x,",
+          ")"
+        ],
+        problem: "LCS anchors punctuation and y, then shows local replacements. It does not communicate that x and color moved.",
+        better: "Argument-aware diffing could detect moved sibling expressions."
+      },
+      {
+        size: 3,
+        title: "Inserted import shifts later edits",
+        old: [
+          "local parse = require('parse')",
+          "local data = parse(input)",
+          "return data.value"
+        ],
+        next: [
+          "local log = require('log')",
+          "local parse = require('parse')",
+          "local data = parse(input)",
+          "return data.result"
+        ],
+        problem: "Position pairing makes the import insertion contaminate every following paired line.",
+        better: "Similarity-based line pairing should keep parse and data lines aligned, then show only the return value edit."
+      },
+      {
+        size: 3,
+        title: "Repeated method chain segments",
+        old: [
+          "query",
+          "  :where('state', state)",
+          "  :where('kind', kind)"
+        ],
+        next: [
+          "query",
+          "  :where('kind', kind)",
+          "  :where('state', state)"
+        ],
+        problem: "Repeated :where calls make the hunk look like two string edits, not a line reorder.",
+        better: "Detect moved repeated structures before token diffing."
+      },
+      {
+        size: 5,
+        title: "Object literal reorder plus one field edit",
+        old: [
+          "local user = {",
+          "  id = row.id,",
+          "  name = row.name,",
+          "  active = row.enabled,",
+          "}"
+        ],
+        next: [
+          "local user = {",
+          "  name = row.display_name,",
+          "  id = row.id,",
+          "  active = row.enabled,",
+          "  role = 'admin',",
+          "}"
+        ],
+        problem: "Line-by-position pairing makes id/name look like mutual replacements, then treats the inserted role line as part of the tail.",
+        better: "Syntax-aware pairing could align object fields by key and mark role as an insertion."
+      },
+      {
+        size: 5,
+        title: "Test table with inserted case",
+        old: [
+          "cases = {",
+          "  { name = 'small', limit = 10 },",
+          "  { name = 'large', limit = 100 },",
+          "  { name = 'huge', limit = 1000 },",
+          "}"
+        ],
+        next: [
+          "cases = {",
+          "  { name = 'tiny', limit = 5 },",
+          "  { name = 'small', limit = 10 },",
+          "  { name = 'large', limit = 100 },",
+          "  { name = 'huge', limit = 2000 },",
+          "}"
+        ],
+        problem: "The inserted tiny case shifts all following rows, hiding the one real huge limit edit.",
+        better: "Row similarity should align same-name cases before intraline spans are computed."
+      },
+      {
+        size: 5,
+        title: "State machine block reorder",
+        old: [
+          "case 'draft':",
+          "  status = 'pending'",
+          "  notify = false",
+          "case 'published':",
+          "  status = 'live'"
+        ],
+        next: [
+          "case 'published':",
+          "  status = 'live'",
+          "case 'draft':",
+          "  status = 'pending'",
+          "  notify = true"
+        ],
+        problem: "The algorithm presents this as many local replacements. The important story is a block move plus one boolean edit.",
+        better: "Tree-sitter islands or block similarity could separate the move from the local boolean change."
+      }
+    ];
+
+    function tokenClass(ch) {
+      if (/^\s$/.test(ch)) return "space";
+      if (/^[A-Za-z0-9_]$/.test(ch)) return "word";
+      return "punct";
+    }
+
+    function wordTokens(text) {
+      const tokens = [];
+      let i = 0;
+      while (i < text.length) {
+        const start = i;
+        const cls = tokenClass(text[i]);
+        i += 1;
+
+        if (cls !== "punct") {
+          while (i < text.length && tokenClass(text[i]) === cls) {
+            i += 1;
+          }
+        }
+
+        tokens.push({
+          text: text.slice(start, i),
+          start_col: start,
+          end_col: i
+        });
+      }
+      return tokens;
+    }
+
+    function lcsPairs(oldTokens, newTokens) {
+      const oldN = oldTokens.length;
+      const newN = newTokens.length;
+      const dp = Array.from({ length: oldN + 1 }, () => Array(newN + 1).fill(0));
+
+      for (let i = oldN - 1; i >= 0; i -= 1) {
+        for (let j = newN - 1; j >= 0; j -= 1) {
+          if (oldTokens[i].text === newTokens[j].text) {
+            dp[i][j] = dp[i + 1][j + 1] + 1;
+          } else {
+            dp[i][j] = Math.max(dp[i + 1][j], dp[i][j + 1]);
+          }
+        }
+      }
+
+      const pairs = [];
+      let i = 0;
+      let j = 0;
+      while (i < oldN && j < newN) {
+        if (oldTokens[i].text === newTokens[j].text) {
+          pairs.push({ old_idx: i, new_idx: j });
+          i += 1;
+          j += 1;
+        } else if (dp[i + 1][j] >= dp[i][j + 1]) {
+          i += 1;
+        } else {
+          j += 1;
+        }
+      }
+      return pairs;
+    }
+
+    function tokenText(tokens, first, last) {
+      if (first > last) return "";
+      return tokens.slice(first, last + 1).map((token) => token.text).join("");
+    }
+
+    function gapCol(tokens, first, fallbackCol) {
+      return tokens[first] ? tokens[first].start_col : fallbackCol;
+    }
+
+    function wordDiffGroups(oldLine, newLine) {
+      const oldTokens = wordTokens(oldLine);
+      const newTokens = wordTokens(newLine);
+      const pairs = lcsPairs(oldTokens, newTokens);
+      const groups = [];
+      let oldIdx = 0;
+      let newIdx = 0;
+
+      function addGroup(oldLast, newLast) {
+        if (oldIdx > oldLast && newIdx > newLast) return;
+
+        groups.push({
+          old_text: oldIdx <= oldLast ? tokenText(oldTokens, oldIdx, oldLast) : "",
+          new_text: newIdx <= newLast ? tokenText(newTokens, newIdx, newLast) : "",
+          old_start_col: oldIdx <= oldLast ? oldTokens[oldIdx].start_col : null,
+          old_end_col: oldIdx <= oldLast ? oldTokens[oldLast].end_col : null,
+          new_start_col: newIdx <= newLast ? newTokens[newIdx].start_col : null,
+          new_end_col: newIdx <= newLast ? newTokens[newLast].end_col : null,
+          insert_col: gapCol(oldTokens, oldIdx, oldLine.length)
+        });
+      }
+
+      for (const pair of pairs) {
+        addGroup(pair.old_idx - 1, pair.new_idx - 1);
+        oldIdx = pair.old_idx + 1;
+        newIdx = pair.new_idx + 1;
+      }
+      addGroup(oldTokens.length - 1, newTokens.length - 1);
+      return groups;
+    }
+
+    function spansForOld(oldLine, newLine) {
+      return wordDiffGroups(oldLine, newLine)
+        .filter((group) => group.old_start_col !== null && group.old_end_col > group.old_start_col)
+        .map((group) => ({ start: group.old_start_col, end: group.old_end_col, cls: "focus-old" }));
+    }
+
+    function spansForNew(oldLine, newLine) {
+      return wordDiffGroups(oldLine, newLine)
+        .filter((group) => group.new_start_col !== null && group.new_end_col > group.new_start_col)
+        .map((group) => ({ start: group.new_start_col, end: group.new_end_col, cls: "focus-new" }));
+    }
+
+    function appendText(parent, text, cls) {
+      if (!text) return;
+      const span = document.createElement("span");
+      if (cls) span.className = cls;
+      span.textContent = text;
+      parent.appendChild(span);
+    }
+
+    function renderCodeLine(text, spans) {
+      const line = document.createElement("div");
+      line.className = "code-line";
+      const sorted = spans.slice().sort((a, b) => a.start - b.start || a.end - b.end);
+      let pos = 0;
+
+      for (const span of sorted) {
+        const start = Math.max(pos, Math.min(span.start, text.length));
+        const end = Math.max(start, Math.min(span.end, text.length));
+        appendText(line, text.slice(pos, start));
+        appendText(line, text.slice(start, end), span.cls);
+        pos = end;
+      }
+      appendText(line, text.slice(pos));
+      return line;
+    }
+
+    function renderViewer(example) {
+      const viewer = document.createElement("div");
+      viewer.className = "viewer";
+      const pairCount = Math.min(example.old.length, example.next.length);
+
+      example.old.forEach((line, index) => {
+        const row = document.createElement("div");
+        row.className = "viewer-row old";
+        const label = document.createElement("div");
+        label.className = "viewer-label";
+        label.textContent = `old ${index + 1}`;
+        row.appendChild(label);
+        row.appendChild(renderCodeLine(line, index < pairCount ? spansForOld(line, example.next[index]) : []));
+        viewer.appendChild(row);
+      });
+
+      example.next.forEach((line, index) => {
+        const row = document.createElement("div");
+        row.className = "viewer-row new";
+        const label = document.createElement("div");
+        label.className = "viewer-label";
+        label.textContent = `new ${index + 1}`;
+        row.appendChild(label);
+        row.appendChild(renderCodeLine(line, index < pairCount ? spansForNew(example.old[index], line) : []));
+        viewer.appendChild(row);
+      });
+
+      return viewer;
+    }
+
+    function renderTokenDump(example) {
+      const details = document.createElement("details");
+      const summary = document.createElement("summary");
+      summary.textContent = "Tokenization for paired lines";
+      details.appendChild(summary);
+
+      const dump = document.createElement("div");
+      dump.className = "token-dump";
+      const pairCount = Math.min(example.old.length, example.next.length);
+
+      for (let i = 0; i < pairCount; i += 1) {
+        dump.appendChild(tokenPanel(`old ${i + 1}`, wordTokens(example.old[i])));
+        dump.appendChild(tokenPanel(`new ${i + 1}`, wordTokens(example.next[i])));
+      }
+
+      details.appendChild(dump);
+      return details;
+    }
+
+    function tokenPanel(title, tokens) {
+      const panel = document.createElement("div");
+      panel.className = "token-panel";
+      const heading = document.createElement("h4");
+      heading.textContent = title;
+      panel.appendChild(heading);
+
+      const list = document.createElement("div");
+      list.className = "token-list";
+      tokens.forEach((token) => {
+        const item = document.createElement("span");
+        item.className = "token";
+        item.textContent = token.text === " " ? "<space>" : token.text;
+        item.title = `${token.start_col}:${token.end_col}`;
+        list.appendChild(item);
+      });
+      panel.appendChild(list);
+      return panel;
+    }
+
+    function renderCase(example, index) {
+      const card = document.createElement("article");
+      card.className = "case-card";
+      card.dataset.size = String(example.size);
+
+      const head = document.createElement("div");
+      head.className = "case-head";
+      const titleWrap = document.createElement("div");
+      const title = document.createElement("h3");
+      title.className = "case-title";
+      title.textContent = `${index + 1}. ${example.title}`;
+      const meta = document.createElement("div");
+      meta.className = "case-meta";
+      meta.textContent = `${example.size}-line old hunk, ${example.next.length} proposed line${example.next.length === 1 ? "" : "s"}`;
+      titleWrap.appendChild(title);
+      titleWrap.appendChild(meta);
+      const pill = document.createElement("span");
+      pill.className = "pill";
+      pill.textContent = `${example.size} line`;
+      head.appendChild(titleWrap);
+      head.appendChild(pill);
+      card.appendChild(head);
+
+      const body = document.createElement("div");
+      body.className = "case-body";
+      const notes = document.createElement("div");
+      notes.className = "note-grid";
+      notes.appendChild(noteBox("Why current output is not ideal", example.problem));
+      notes.appendChild(noteBox("What would be better", example.better));
+      body.appendChild(notes);
+      body.appendChild(renderViewer(example));
+      body.appendChild(renderTokenDump(example));
+      card.appendChild(body);
+      return card;
+    }
+
+    function noteBox(title, text) {
+      const box = document.createElement("div");
+      box.className = "note";
+      const strong = document.createElement("strong");
+      strong.textContent = title;
+      const content = document.createElement("div");
+      content.textContent = text;
+      box.appendChild(strong);
+      box.appendChild(content);
+      return box;
+    }
+
+    function renderAll() {
+      const container = document.getElementById("cases");
+      container.textContent = "";
+      cases.forEach((example, index) => {
+        container.appendChild(renderCase(example, index));
+      });
+      document.getElementById("case-count").textContent = `${cases.length} cases`;
+    }
+
+    function applyFilter(filter) {
+      document.querySelectorAll(".case-card").forEach((card) => {
+        card.classList.toggle("hidden", filter !== "all" && card.dataset.size !== filter);
+      });
+      document.querySelectorAll("#filters button").forEach((button) => {
+        button.classList.toggle("active", button.dataset.filter === filter);
+      });
+    }
+
+    document.getElementById("filters").addEventListener("click", (event) => {
+      const button = event.target.closest("button[data-filter]");
+      if (!button) return;
+      applyFilter(button.dataset.filter);
+    });
+
+    renderAll();
+  </script>
+</body>
+</html>

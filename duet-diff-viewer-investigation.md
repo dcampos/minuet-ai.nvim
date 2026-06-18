@@ -29,6 +29,9 @@ This is intentionally small and editor-native, but it has known limitations:
 line pairing inside multi-line hunks is naive, and tokenization is not very
 code-aware.
 
+The local visualization page for these failure cases lives at
+`experiments/duet-nes/diff-viewer-failures/index.html`.
+
 ## Goal
 
 Keep Neovim rendering custom. Look for structured edit spans, not pre-rendered
