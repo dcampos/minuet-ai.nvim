@@ -1,6 +1,6 @@
 -- Context gatherers for the Inception Mercury Edit 2 prompt's
 -- `<|recently_viewed_code_snippets|>` section: treesitter scope, LSP diagnostics,
--- and (for commit messages) the staged git diff. The exact text shapes mirror
+-- and related editor context. The exact text shapes mirror
 -- the reference implementation in cursortab.nvim so we stay in-distribution with
 -- what Mercury Edit 2 was trained on.
 
@@ -186,30 +186,6 @@ function M.diagnostics_text(bufnr)
         parts[#parts + 1] = line
     end
     return table.concat(parts, '\n') .. '\n'
-end
-
---- Staged git diff, only for commit-message buffers (matches cursortab, which
---- surfaces it solely to help write COMMIT_EDITMSG). Returns nil otherwise.
----@param path string
----@param max_bytes integer
----@return string?
-function M.git_staged_diff(path, max_bytes)
-    if not path:match 'COMMIT_EDITMSG$' then
-        return nil
-    end
-    local dir = vim.fn.fnamemodify(path, ':h')
-    if dir == '' then
-        dir = vim.fn.getcwd()
-    end
-    local out = vim.fn.systemlist { 'git', '-C', dir, 'diff', '--cached' }
-    if vim.v.shell_error ~= 0 or not out or #out == 0 then
-        return nil
-    end
-    local diff = table.concat(out, '\n')
-    if #diff > max_bytes then
-        diff = diff:sub(1, max_bytes)
-    end
-    return diff
 end
 
 return M

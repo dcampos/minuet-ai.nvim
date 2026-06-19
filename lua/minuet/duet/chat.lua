@@ -42,7 +42,6 @@ local function request_inception_edit(opts, callback, ctx)
         snippet_count = opts.snippet_count,
         snippet_radius = opts.snippet_radius,
         max_siblings = opts.max_siblings,
-        git_diff_max_bytes = opts.git_diff_max_bytes,
     })
     local body = {
         model = opts.model,

@@ -107,10 +107,10 @@ end
 
 --- Record a shown prediction in the per-buffer inter-diff memory: its patch now,
 --- the user's disposition later (via settle). Capped to the most recent N.
-local function remember_shown(bufnr, patch)
+local function remember_shown(bufnr, patch, visible)
     local s = scfg()
     if not s.prediction_memory then
-        return
+        return nil
     end
     local mem = get_memory(bufnr)
     local entry = { patch = patch, result = 'shown' }
@@ -118,28 +118,68 @@ local function remember_shown(bufnr, patch)
     while #mem > (s.prediction_memory_max or 8) do
         table.remove(mem, 1)
     end
-    internal.shown_mem = entry
+    if visible ~= false then
+        internal.shown_mem = entry
+    end
+    return entry
 end
 
 local function get_state(bufnr)
     local state = internal.states[bufnr]
     if not state then
-        state = {}
+        state = { queue = {} }
         internal.states[bufnr] = state
     end
+    state.queue = state.queue or {}
     return state
 end
 
-local function clear_state(bufnr, state)
+local function clear_state(bufnr, state, opts)
+    opts = opts or {}
     state = state or get_state(bufnr)
     preview.clear(bufnr, state)
-    state.pending_seq = nil
+    if not opts.keep_pending then
+        state.pending_seq = nil
+        state.pending_seqs = nil
+    end
+    if not opts.keep_queue then
+        state.queue = {}
+    end
     state.changedtick = nil
     state.range = nil
     state.original_lines = nil
     state.proposed_lines = nil
     state.proposed_cursor = nil
     state.proposed_patch = nil
+    state.preview_chunks = nil
+    state.preview_active = nil
+    state.preview_focus = nil
+    state.needs_navigation_after_accept = nil
+end
+
+local function add_pending(state, seq)
+    state.pending_seqs = state.pending_seqs or {}
+    state.pending_seqs[seq] = true
+    state.pending_seq = seq -- kept for old tests/introspection
+end
+
+local function clear_pending(state, seq)
+    if state.pending_seqs then
+        state.pending_seqs[seq] = nil
+        if not next(state.pending_seqs) then
+            state.pending_seqs = nil
+            state.pending_seq = nil
+        end
+    elseif state.pending_seq == seq then
+        state.pending_seq = nil
+    end
+end
+
+local function is_pending(state, seq)
+    if state.pending_seqs then
+        return state.pending_seqs[seq] == true
+    end
+    return state.pending_seq == seq
 end
 
 local function buf_lines(bufnr)
@@ -194,7 +234,8 @@ end
 --- the mode-specific decline policy) and the session user turn (recent edits +
 --- cursor file), plus an optional "propose a different edit" nudge for cycling.
 ---@param mode 'manual'|'auto'
-local function build_messages(bufnr, mode, reject_patch)
+local function build_messages(bufnr, mode, opts)
+    opts = opts or {}
     local s = scfg()
     local system = s.system .. '\n\n' .. s.capability_reminder
     -- Only auto-trigger may legitimately decline; a manual trigger must edit.
@@ -215,11 +256,14 @@ local function build_messages(bufnr, mode, reject_patch)
 
     local user = session.build_user_turn(bufnr, {
         ctx_lines = s.history_context_lines,
+        current_lines = opts.current_lines,
+        focus = opts.focus,
+        simulated_accept = opts.simulated_accept,
     })
-    if reject_patch then
+    if opts.reject_patch then
         user = user
             .. '\n\nThe following edit was already proposed and rejected; propose a DIFFERENT next edit:\n'
-            .. reject_patch
+            .. opts.reject_patch
     end
     table.insert(messages, { role = 'user', content = user })
     return messages
@@ -241,14 +285,98 @@ local function first_diff_row(a, b)
     return 1
 end
 
-local function show_preview(bufnr, state, original_lines, new_lines, changedtick, patch)
+-- Forward declarations so async request handling and prefetch can recurse.
+local run_loop, predict, predict_auto
+
+local function current_preview_busy(state)
+    return state.proposed_lines ~= nil and state.preview_chunks ~= nil and #state.preview_chunks > 0
+end
+
+local function install_preview(bufnr, state, original_lines, new_lines, changedtick, patch, opts)
+    opts = opts or {}
     state.changedtick = changedtick
     state.range = { start_row = 0, end_row = #original_lines }
-    state.original_lines = original_lines
+    state.original_lines = vim.deepcopy(original_lines)
     state.proposed_lines = new_lines
     state.proposed_cursor = nil
     state.proposed_patch = patch
+    state.preview_active = nil
+    state.preview_focus = opts.focus_kind
+    state.needs_navigation_after_accept = nil
     preview.render(bufnr, state)
+end
+
+local function maybe_prefetch_after_preview(bufnr, state)
+    local s = scfg()
+    if not auto_active() or s.prefetch_after_preview == false or not state.proposed_lines then
+        return
+    end
+    if require('minuet').config.duet.provider == 'inception_edit' then
+        return
+    end
+    local simulated = vim.deepcopy(state.proposed_lines)
+    vim.schedule(function()
+        if api.nvim_buf_is_loaded(bufnr) and api.nvim_get_current_buf() == bufnr and is_normal_mode() then
+            predict('auto', {
+                additive = true,
+                prefetch = true,
+                current_lines = simulated,
+                simulated_accept = true,
+                focus = { kind = 'simulated_accept' },
+                focus_kind = 'prefetch',
+                changedtick = state.changedtick,
+            })
+        end
+    end)
+end
+
+local function show_preview(bufnr, state, original_lines, new_lines, changedtick, patch, opts)
+    opts = opts or {}
+    if opts.queue or current_preview_busy(state) then
+        state.queue = state.queue or {}
+        state.queue[#state.queue + 1] = {
+            original_lines = vim.deepcopy(original_lines),
+            proposed_lines = new_lines,
+            changedtick = changedtick,
+            patch = patch,
+            focus_kind = opts.focus_kind,
+            last = opts.last,
+            memory_entry = opts.memory_entry,
+        }
+        return
+    end
+
+    install_preview(bufnr, state, original_lines, new_lines, changedtick, patch, opts)
+    if not opts.no_prefetch then
+        maybe_prefetch_after_preview(bufnr, state)
+    end
+end
+
+local function show_next_queued(bufnr, state)
+    state.queue = state.queue or {}
+    local current = buf_lines(bufnr)
+    while #state.queue > 0 do
+        local queued = table.remove(state.queue, 1)
+        if vim.deep_equal(current, queued.original_lines) then
+            internal.shown = queued.last
+            internal.shown_mem = queued.memory_entry or remember_shown(bufnr, queued.patch)
+            if queued.last and (queued.last.result == nil or queued.last.result == 'queued') then
+                queued.last.result = 'shown'
+            end
+            install_preview(
+                bufnr,
+                state,
+                current,
+                queued.proposed_lines,
+                utils.get_changedtick(bufnr),
+                queued.patch,
+                { focus_kind = queued.focus_kind }
+            )
+            maybe_prefetch_after_preview(bufnr, state)
+            return true
+        end
+    end
+    return false
 end
 
 local function proposed_from_direct_edit(buf_lines, direct)
@@ -267,22 +395,19 @@ local function proposed_from_direct_edit(buf_lines, direct)
     return proposed
 end
 
--- Forward declaration so the async loop can recurse.
-local run_loop
-
 ---@param ctx table
 function run_loop(ctx)
     local s = scfg()
     if ctx.attempts >= (s.max_attempts or 3) then
         utils.notify('Minuet duet: no valid patch after ' .. ctx.attempts .. ' attempts.', 'warn', vim.log.levels.WARN)
         set_outcome(ctx, 'no valid patch after ' .. ctx.attempts .. ' attempts')
-        ctx.state.pending_seq = nil
+        clear_pending(ctx.state, ctx.seq)
         return
     end
 
     chat.request(ctx.messages, tools.specs(), function(result)
         vim.schedule(function()
-            if not api.nvim_buf_is_loaded(ctx.bufnr) or ctx.state.pending_seq ~= ctx.seq then
+            if not api.nvim_buf_is_loaded(ctx.bufnr) or not is_pending(ctx.state, ctx.seq) then
                 return -- superseded or buffer gone
             end
 
@@ -293,25 +418,40 @@ function run_loop(ctx)
             if result.error then
                 utils.notify('Minuet duet request failed: ' .. result.error, 'warn', vim.log.levels.WARN)
                 set_outcome(ctx, 'request failed: ' .. tostring(result.error))
-                ctx.state.pending_seq = nil
+                clear_pending(ctx.state, ctx.seq)
                 return
             end
 
             if result.direct_edit then
-                if utils.get_changedtick(ctx.bufnr) ~= ctx.changedtick then
+                if not ctx.prefetch and utils.get_changedtick(ctx.bufnr) ~= ctx.changedtick then
                     utils.notify('Minuet duet: buffer changed; discarded.', 'verbose', vim.log.levels.INFO)
                     set_outcome(ctx, 'buffer changed; discarded')
-                    ctx.state.pending_seq = nil
+                    clear_pending(ctx.state, ctx.seq)
                     return
                 end
                 local new_lines = proposed_from_direct_edit(ctx.buf_lines, result.direct_edit)
                 set_outcome(ctx, 'preview shown')
+                local queue = ctx.prefetch or current_preview_busy(ctx.state)
                 if ctx.last then
-                    ctx.last.result = 'shown'
+                    ctx.last.result = queue and 'queued' or 'shown'
                 end
-                internal.shown = ctx.last
-                ctx.state.pending_seq = nil
-                show_preview(ctx.bufnr, ctx.state, ctx.buf_lines, new_lines, ctx.changedtick, result.direct_edit.content)
+                if not queue then
+                    internal.shown = ctx.last
+                end
+                clear_pending(ctx.state, ctx.seq)
+                show_preview(
+                    ctx.bufnr,
+                    ctx.state,
+                    ctx.buf_lines,
+                    new_lines,
+                    ctx.changedtick,
+                    result.direct_edit.content,
+                    {
+                        queue = queue,
+                        focus_kind = ctx.focus_kind,
+                        last = ctx.last,
+                    }
+                )
                 return
             end
 
@@ -330,13 +470,17 @@ function run_loop(ctx)
                         -- Read budget exhausted: stop rather than service another read,
                         -- otherwise a model that keeps calling `read` loops unbounded
                         -- (reads do not spend an attempt).
-                        utils.notify('Minuet duet: read limit reached; no patch produced.', 'verbose', vim.log.levels.INFO)
+                        utils.notify(
+                            'Minuet duet: read limit reached; no patch produced.',
+                            'verbose',
+                            vim.log.levels.INFO
+                        )
                         record_turn(ctx, { kind = 'read', reasoning = reasoning, args = args, refused = true })
                         set_outcome(ctx, 'read limit reached')
-                        ctx.state.pending_seq = nil
+                        clear_pending(ctx.state, ctx.seq)
                         return
                     end
-                    local content = tools.read_result(ctx.bufnr, args)
+                    local content = tools.read_result(ctx.bufnr, args, ctx.buf_lines)
                     record_turn(ctx, { kind = 'read', reasoning = reasoning, args = args, result = content })
                     table.insert(ctx.messages, assistant_echo(message))
                     table.insert(ctx.messages, { role = 'tool', tool_call_id = call.id, content = content })
@@ -345,14 +489,18 @@ function run_loop(ctx)
                     return
                 elseif name == 'apply_patch' then
                     local patch = args.input or ''
-                    if utils.get_changedtick(ctx.bufnr) ~= ctx.changedtick then
+                    if not ctx.prefetch and utils.get_changedtick(ctx.bufnr) ~= ctx.changedtick then
                         utils.notify('Minuet duet: buffer changed; discarded.', 'verbose', vim.log.levels.INFO)
-                        record_turn(ctx, { kind = 'apply_patch', reasoning = reasoning, content = msg_content, patch = patch })
+                        record_turn(
+                            ctx,
+                            { kind = 'apply_patch', reasoning = reasoning, content = msg_content, patch = patch }
+                        )
                         set_outcome(ctx, 'buffer changed; discarded')
-                        ctx.state.pending_seq = nil
+                        clear_pending(ctx.state, ctx.seq)
                         return
                     end
-                    local applied, new_lines, err = apply_patch.apply(ctx.buf_lines, patch, { cursor_row = ctx.cursor_row })
+                    local applied, new_lines, err =
+                        apply_patch.apply(ctx.buf_lines, patch, { cursor_row = ctx.cursor_row })
                     record_turn(ctx, {
                         kind = 'apply_patch',
                         reasoning = reasoning,
@@ -363,13 +511,21 @@ function run_loop(ctx)
                     })
                     if applied then
                         set_outcome(ctx, 'preview shown')
+                        local queue = ctx.prefetch or current_preview_busy(ctx.state)
                         if ctx.last then
-                            ctx.last.result = 'shown'
+                            ctx.last.result = queue and 'queued' or 'shown'
                         end
-                        internal.shown = ctx.last
-                        remember_shown(ctx.bufnr, patch)
-                        ctx.state.pending_seq = nil
-                        show_preview(ctx.bufnr, ctx.state, ctx.buf_lines, new_lines, ctx.changedtick, patch)
+                        if not queue then
+                            internal.shown = ctx.last
+                        end
+                        local memory_entry = not queue and remember_shown(ctx.bufnr, patch) or nil
+                        clear_pending(ctx.state, ctx.seq)
+                        show_preview(ctx.bufnr, ctx.state, ctx.buf_lines, new_lines, ctx.changedtick, patch, {
+                            queue = queue,
+                            focus_kind = ctx.focus_kind,
+                            last = ctx.last,
+                            memory_entry = memory_entry,
+                        })
                         return
                     end
                     table.insert(ctx.messages, assistant_echo(message))
@@ -389,17 +545,33 @@ function run_loop(ctx)
             -- Plain-content fallbacks ---------------------------------------
             local content = type(message.content) == 'string' and message.content or ''
             if content:find '%*%*%* Begin Patch' then
-                local applied, new_lines, err = apply_patch.apply(ctx.buf_lines, content, { cursor_row = ctx.cursor_row })
-                record_turn(ctx, { kind = 'content_patch', reasoning = reasoning, content = content, patch = content, applied = applied, error = err })
+                local applied, new_lines, err =
+                    apply_patch.apply(ctx.buf_lines, content, { cursor_row = ctx.cursor_row })
+                record_turn(ctx, {
+                    kind = 'content_patch',
+                    reasoning = reasoning,
+                    content = content,
+                    patch = content,
+                    applied = applied,
+                    error = err,
+                })
                 if applied then
                     set_outcome(ctx, 'preview shown')
+                    local queue = ctx.prefetch or current_preview_busy(ctx.state)
                     if ctx.last then
-                        ctx.last.result = 'shown'
+                        ctx.last.result = queue and 'queued' or 'shown'
                     end
-                    internal.shown = ctx.last
-                    remember_shown(ctx.bufnr, content)
-                    ctx.state.pending_seq = nil
-                    show_preview(ctx.bufnr, ctx.state, ctx.buf_lines, new_lines, ctx.changedtick, content)
+                    if not queue then
+                        internal.shown = ctx.last
+                    end
+                    local memory_entry = not queue and remember_shown(ctx.bufnr, content) or nil
+                    clear_pending(ctx.state, ctx.seq)
+                    show_preview(ctx.bufnr, ctx.state, ctx.buf_lines, new_lines, ctx.changedtick, content, {
+                        queue = queue,
+                        focus_kind = ctx.focus_kind,
+                        last = ctx.last,
+                        memory_entry = memory_entry,
+                    })
                 else
                     table.insert(ctx.messages, assistant_echo(message))
                     table.insert(ctx.messages, { role = 'user', content = 'apply_patch failed: ' .. tostring(err) })
@@ -413,7 +585,7 @@ function run_loop(ctx)
                 record_turn(ctx, { kind = 'no_edit', reasoning = reasoning, content = content })
                 if ctx.mode == 'auto' then
                     set_outcome(ctx, 'no edit suggested')
-                    ctx.state.pending_seq = nil
+                    clear_pending(ctx.state, ctx.seq)
                     return
                 end
                 -- Manual trigger: declining is not a valid response. Tell the model
@@ -434,7 +606,7 @@ function run_loop(ctx)
 
             record_turn(ctx, { kind = 'other', reasoning = reasoning, content = content })
             set_outcome(ctx, 'no usable edit')
-            ctx.state.pending_seq = nil
+            clear_pending(ctx.state, ctx.seq)
             if ctx.mode ~= 'auto' then
                 utils.notify('Minuet duet: model returned no usable edit.', 'verbose', vim.log.levels.INFO)
             end
@@ -443,8 +615,8 @@ function run_loop(ctx)
 end
 
 ---@param mode? 'manual'|'auto'
----@param opts? { reject_patch?: string }
-local function predict(mode, opts)
+---@param opts? { reject_patch?: string, additive?: boolean, current_lines?: string[], simulated_accept?: boolean, prefetch?: boolean, focus?: table, focus_kind?: string }
+function predict(mode, opts)
     mode = mode or 'manual'
     opts = opts or {}
     local bufnr = api.nvim_get_current_buf()
@@ -455,32 +627,36 @@ local function predict(mode, opts)
         return
     end
     local state = get_state(bufnr)
-    -- A preview still on screen when a new prediction starts was passed over.
-    settle('ignored', false)
-    clear_state(bufnr, state)
+    if not opts.additive and not opts.prefetch then
+        -- A preview still on screen when a new prediction starts was passed over.
+        settle('ignored', false)
+        clear_state(bufnr, state)
+    end
 
     local s = scfg()
-    if session.should_reset(bufnr, s.max_edits, s.idle_minutes) then
+    if not opts.additive and not opts.prefetch and session.should_reset(bufnr, s.max_edits, s.idle_minutes) then
         session.reset(bufnr, s.seed_edits)
         internal.memory[bufnr] = nil -- fresh session: drop prior-prediction memory
     end
 
     internal.request_seq = internal.request_seq + 1
     local seq = internal.request_seq
-    state.pending_seq = seq
+    add_pending(state, seq)
     state.mode = mode
 
-    if mode ~= 'auto' then
+    if mode ~= 'auto' and not opts.prefetch then
         utils.notify('Minuet duet predicting...', 'verbose', vim.log.levels.INFO)
     end
 
-    local messages = build_messages(bufnr, mode, opts.reject_patch)
+    local messages = build_messages(bufnr, mode, opts)
     local duet = require('minuet').config.duet
     local popts = duet.provider_options[duet.provider] or {}
+    local focus_kind = opts.focus_kind or (opts.focus and opts.focus.kind) or 'cursor'
     M.last = {
         time = os.date '%H:%M:%S',
         path = vim.fn.fnamemodify(api.nvim_buf_get_name(bufnr), ':.'),
         mode = mode,
+        focus = focus_kind,
         model = popts.model,
         provider = duet.provider,
         effort = popts.optional and popts.optional.reasoning and popts.optional.reasoning.effort or nil,
@@ -493,15 +669,23 @@ local function predict(mode, opts)
     table.insert(M.history, M.last)
     trim_history()
 
+    local request_lines = opts.current_lines or buf_lines(bufnr)
+    local cursor_row = api.nvim_win_get_cursor(0)[1]
+    if opts.focus and opts.focus.row then
+        cursor_row = opts.focus.row
+    end
+
     run_loop {
         bufnr = bufnr,
         state = state,
         seq = seq,
-        changedtick = utils.get_changedtick(bufnr),
-        buf_lines = buf_lines(bufnr),
-        cursor_row = api.nvim_win_get_cursor(0)[1], -- bias patch matching toward the cursor
+        changedtick = opts.changedtick or utils.get_changedtick(bufnr),
+        buf_lines = request_lines,
+        cursor_row = cursor_row, -- bias patch matching toward the requested area
         messages = messages,
         mode = mode,
+        focus_kind = focus_kind,
+        prefetch = opts.prefetch,
         attempts = 0,
         reads = 0,
         last = M.last,
@@ -536,19 +720,126 @@ local function apply()
     local line = api.nvim_buf_get_lines(bufnr, target_row - 1, target_row, false)[1] or ''
     pcall(api.nvim_win_set_cursor, 0, { target_row, #line })
 
-    clear_state(bufnr, state)
+    clear_state(bufnr, state, { keep_queue = true })
 
-    -- Burst: chain straight into the next prediction when auto-trigger is on.
-    -- `nvim_buf_set_lines` does not fire TextChanged, so the edit-capture autocmd
-    -- never sees this accept; fire it here (no debounce) so consecutive accepts
-    -- feel instant.
+    if show_next_queued(bufnr, state) then
+        return
+    end
+
+    -- Burst fallback when prefetch did not produce a queued prediction.
     if auto_active() then
         vim.schedule(function()
             if api.nvim_buf_is_loaded(bufnr) and api.nvim_get_current_buf() == bufnr and is_normal_mode() then
-                predict 'auto'
+                predict_auto()
             end
         end)
     end
+end
+
+local function discard_stale_prediction(bufnr, state)
+    if utils.get_changedtick(bufnr) == state.changedtick then
+        return false
+    end
+    settle('ignored', false)
+    clear_state(bufnr, state)
+    utils.notify('Minuet duet prediction is stale and has been discarded.', 'warn', vim.log.levels.WARN)
+    return true
+end
+
+local function finish_accept(bufnr, state, before, after, keep_partial)
+    api.nvim_buf_set_lines(bufnr, 0, -1, false, after)
+    session.record_accepted_edit(bufnr, before, after, scfg().history_context_lines)
+    state.changedtick = utils.get_changedtick(bufnr)
+
+    if vim.deep_equal(after, state.proposed_lines) then
+        settle('accepted', true)
+        clear_state(bufnr, state, { keep_queue = true })
+        if show_next_queued(bufnr, state) then
+            return
+        end
+        if auto_active() then
+            vim.schedule(function()
+                if api.nvim_buf_is_loaded(bufnr) and api.nvim_get_current_buf() == bufnr and is_normal_mode() then
+                    predict_auto()
+                end
+            end)
+        end
+        return
+    end
+
+    if keep_partial then
+        if internal.shown and internal.shown.result == 'shown' then
+            internal.shown.result = 'partially accepted'
+        end
+        state.original_lines = after
+        state.needs_navigation_after_accept = true
+        state.preview_active = nil
+        preview.render(bufnr, state)
+    end
+end
+
+local function accept_chunk()
+    local bufnr = api.nvim_get_current_buf()
+    local state = get_state(bufnr)
+    if not state.proposed_lines or not state.range then
+        utils.notify('No Minuet duet prediction to apply.', 'warn', vim.log.levels.WARN)
+        return
+    end
+    if discard_stale_prediction(bufnr, state) then
+        return
+    end
+
+    preview.rebuild_chunks(state)
+    local chunk = select(1, preview.current_chunk(state))
+    if not chunk then
+        apply()
+        return
+    end
+
+    local before = buf_lines(bufnr)
+    local after = preview.apply_chunk(before, chunk)
+    finish_accept(bufnr, state, before, after, true)
+end
+
+local function next_chunk()
+    local bufnr = api.nvim_get_current_buf()
+    local state = get_state(bufnr)
+    if not state.proposed_lines or not state.range then
+        predict 'manual'
+        return
+    end
+    if discard_stale_prediction(bufnr, state) then
+        return
+    end
+    state.needs_navigation_after_accept = nil
+    preview.select_next_chunk(bufnr, state)
+end
+
+local function accept_or_next()
+    local bufnr = api.nvim_get_current_buf()
+    local state = get_state(bufnr)
+    if not state.proposed_lines or not state.range then
+        predict 'manual'
+        return
+    end
+    if discard_stale_prediction(bufnr, state) then
+        return
+    end
+
+    if state.needs_navigation_after_accept then
+        next_chunk()
+        return
+    end
+
+    local _, active_idx = preview.current_chunk(state)
+    local _, cursor_idx = preview.chunk_at_cursor(state)
+    if cursor_idx and (active_idx == nil or active_idx == cursor_idx) then
+        state.preview_active = cursor_idx
+        accept_chunk()
+        return
+    end
+
+    next_chunk()
 end
 
 local function dismiss()
@@ -583,6 +874,22 @@ local function toggle()
     vim.notify('Minuet duet auto-trigger ' .. (M.auto_enabled and 'enabled' or 'disabled'), vim.log.levels.INFO)
 end
 
+function predict_auto()
+    predict('auto', { focus = { kind = 'cursor' }, focus_kind = 'cursor' })
+    if scfg().diagnostic_auto_trigger == false then
+        return
+    end
+    local bufnr = api.nvim_get_current_buf()
+    local focus = session.recent_diagnostic_focus(bufnr)
+    if focus then
+        predict('auto', {
+            additive = true,
+            focus = focus,
+            focus_kind = 'diagnostic',
+        })
+    end
+end
+
 -- Immediate per-buffer handler for edits: capture history, invalidate preview,
 -- and optionally auto-trigger. Vim already groups edits into meaningful normal-
 -- mode transitions via TextChanged/InsertLeave; delaying here hides that signal.
@@ -591,16 +898,39 @@ local function on_edit(info)
     if not is_file_buffer(bufnr) then
         return -- ignore edits on the inspect float / scratch buffers
     end
-    -- An edit while a preview is up means the user passed it over.
-    settle('ignored', false)
     local state = internal.states[bufnr]
-    if state then
+    if state and state.proposed_lines and state.original_lines then
+        local current = buf_lines(bufnr)
+        local level = tonumber(scfg().partial_accept_level) or 1
+        if preview.compatible_progress(state.original_lines, current, state.proposed_lines, state, level) then
+            session.capture(bufnr, scfg().history_context_lines)
+            if vim.deep_equal(current, state.proposed_lines) then
+                settle('accepted', true)
+                clear_state(bufnr, state, { keep_queue = true })
+                show_next_queued(bufnr, state)
+            else
+                if internal.shown and internal.shown.result == 'shown' then
+                    internal.shown.result = 'partially accepted'
+                end
+                state.original_lines = current
+                state.changedtick = utils.get_changedtick(bufnr)
+                state.preview_active = nil
+                state.needs_navigation_after_accept = true
+                preview.render(bufnr, state)
+            end
+            return
+        end
+
+        -- An incompatible edit while a preview is up means the user passed it over.
+        settle('ignored', false)
+        clear_state(bufnr, state)
+    elseif state then
         clear_state(bufnr, state)
     end
 
     session.capture(bufnr, scfg().history_context_lines)
     if auto_active() and api.nvim_get_current_buf() == bufnr and is_normal_mode() then
-        predict 'auto'
+        predict_auto()
     end
 end
 
@@ -609,6 +939,9 @@ local action = {
         predict 'manual'
     end,
     apply = apply,
+    accept_chunk = accept_chunk,
+    next_chunk = next_chunk,
+    accept_or_next = accept_or_next,
     dismiss = dismiss,
     cycle = cycle,
     toggle = toggle,
@@ -664,6 +997,14 @@ function M.setup()
             session.note_cursor(info.buf)
         end,
         desc = '[minuet.duet] record recent cursor locations',
+    })
+
+    api.nvim_create_autocmd('DiagnosticChanged', {
+        group = M.augroup,
+        callback = function(info)
+            session.note_diagnostics(info.buf, info.data and info.data.diagnostics or nil)
+        end,
+        desc = '[minuet.duet] record recent diagnostics',
     })
 
     api.nvim_create_autocmd('BufWipeout', {

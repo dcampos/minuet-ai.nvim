@@ -162,6 +162,7 @@ end
 -- ---------------------------------------------------------------------------
 
 M.states = {}
+M.diagnostic_history = {}
 
 local function buf_path(bufnr)
     local name = vim.api.nvim_buf_get_name(bufnr)
@@ -340,6 +341,136 @@ end
 
 function M.clear(bufnr)
     M.states[bufnr] = nil
+    M.diagnostic_history[bufnr] = nil
+end
+
+local severity_name = { [1] = 'ERROR', [2] = 'WARNING', [3] = 'INFORMATION', [4] = 'HINT' }
+
+local function diagnostic_line(d)
+    local row = (d.lnum or 0) + 1
+    local col = (d.col or 0) + 1
+    local msg = d.message or ''
+    local source = d.source and d.source ~= '' and (' (source: ' .. d.source .. ')') or ''
+    return ('line %d, column %d: [%s] %s%s'):format(row, col, severity_name[d.severity] or 'ERROR', msg, source)
+end
+
+---@param bufnr integer
+---@param diagnostics? vim.Diagnostic[]
+function M.note_diagnostics(bufnr, diagnostics)
+    if not vim.api.nvim_buf_is_valid(bufnr) then
+        return
+    end
+    diagnostics = diagnostics or vim.diagnostic.get(bufnr)
+    if not diagnostics or #diagnostics == 0 then
+        return
+    end
+
+    local hist = M.diagnostic_history[bufnr]
+    if not hist then
+        hist = {}
+        M.diagnostic_history[bufnr] = hist
+    end
+    local lines = get_lines(bufnr)
+    for _, d in ipairs(diagnostics) do
+        hist[#hist + 1] = {
+            lnum = d.lnum,
+            col = d.col,
+            end_lnum = d.end_lnum,
+            end_col = d.end_col,
+            severity = d.severity,
+            message = d.message,
+            source = d.source,
+            code = d.code,
+            line_text = lines[(d.lnum or 0) + 1] or '',
+            ts_ms = vim.uv.now(),
+        }
+    end
+
+    local max_entries = tonumber(session_config().diagnostic_history_max) or 20
+    while #hist > max_entries do
+        table.remove(hist, 1)
+    end
+end
+
+---@param bufnr integer
+---@return table?
+function M.recent_diagnostic_focus(bufnr)
+    local hist = M.diagnostic_history[bufnr]
+    if hist and #hist > 0 then
+        local d = hist[#hist]
+        return {
+            kind = 'diagnostic',
+            row = (d.lnum or 0) + 1,
+            col = d.col or 0,
+            diagnostic = d,
+        }
+    end
+    local current = vim.diagnostic.get(bufnr)
+    if current and #current > 0 then
+        table.sort(current, function(a, b)
+            if (a.severity or 99) ~= (b.severity or 99) then
+                return (a.severity or 99) < (b.severity or 99)
+            end
+            return (a.lnum or 0) < (b.lnum or 0)
+        end)
+        local d = current[1]
+        return {
+            kind = 'diagnostic',
+            row = (d.lnum or 0) + 1,
+            col = d.col or 0,
+            diagnostic = d,
+        }
+    end
+    return nil
+end
+
+---@param bufnr integer
+---@param focus? table
+---@return string
+local function diagnostic_history_text(bufnr, focus)
+    local items = {}
+    local seen = {}
+    local hist = M.diagnostic_history[bufnr] or {}
+    for i = #hist, 1, -1 do
+        local d = hist[i]
+        local key = table.concat({ tostring(d.lnum), tostring(d.col), tostring(d.message), tostring(d.source) }, '\t')
+        if not seen[key] then
+            seen[key] = true
+            items[#items + 1] = d
+        end
+        if #items >= 8 then
+            break
+        end
+    end
+
+    local current = vim.diagnostic.get(bufnr)
+    for _, d in ipairs(current or {}) do
+        local key = table.concat({ tostring(d.lnum), tostring(d.col), tostring(d.message), tostring(d.source) }, '\t')
+        if not seen[key] then
+            seen[key] = true
+            items[#items + 1] = d
+        end
+        if #items >= 12 then
+            break
+        end
+    end
+
+    if #items == 0 and not (focus and focus.diagnostic) then
+        return ''
+    end
+
+    local out = { 'Recent LSP diagnostics:' }
+    if focus and focus.diagnostic then
+        out[#out + 1] = 'Focus diagnostic: ' .. diagnostic_line(focus.diagnostic)
+    end
+    for _, d in ipairs(items) do
+        local line = diagnostic_line(d)
+        if d.line_text and d.line_text ~= '' then
+            line = line .. (' | text: `%s`'):format(d.line_text)
+        end
+        out[#out + 1] = line
+    end
+    return table.concat(out, '\n')
 end
 
 local function slice_lines(lines, first, last)
@@ -442,7 +573,7 @@ end
 --- current file with a cursor-centered (syntax-snapped) code_to_edit region, and
 --- the chronological range-based edit_diff_history.
 ---@param bufnr integer
----@param opts? { lines_before?: integer, lines_after?: integer, max_editable_lines?: integer, snippet_count?: integer, snippet_radius?: integer, max_siblings?: integer, git_diff_max_bytes?: integer }
+---@param opts? { lines_before?: integer, lines_after?: integer, max_editable_lines?: integer, snippet_count?: integer, snippet_radius?: integer, max_siblings?: integer }
 ---@return string prompt
 ---@return { path: string, start_row: integer, end_row: integer, original_lines: string[] } region
 function M.build_inception_edit_turn(bufnr, opts)
@@ -482,7 +613,6 @@ function M.build_inception_edit_turn(bufnr, opts)
     local snippets = recent_snippets(bufnr, opts.snippet_count or 3, opts.snippet_radius or 10)
     local diag_text = nes.diagnostics_text(bufnr)
     local ts_text = nes.treesitter_text(ts)
-    local git_diff = nes.git_staged_diff(path, opts.git_diff_max_bytes or 8000)
 
     local entries = {}
     vim.list_extend(entries, state.seed_diff_entries or {})
@@ -510,15 +640,6 @@ function M.build_inception_edit_turn(bufnr, opts)
         w '<|recently_viewed_code_snippet|>\n'
         w 'code_snippet_file_path: treesitter_context\n'
         w(ts_text)
-        w '<|/recently_viewed_code_snippet|>\n'
-    end
-    if git_diff then
-        w '<|recently_viewed_code_snippet|>\n'
-        w 'code_snippet_file_path: staged_git_diff\n'
-        w(git_diff)
-        if git_diff:sub(-1) ~= '\n' then
-            w '\n'
-        end
         w '<|/recently_viewed_code_snippet|>\n'
     end
     w '<|/recently_viewed_code_snippets|>\n'
@@ -562,13 +683,13 @@ end
 --- the apply_patch-trained model. The system prompt and tool definitions live in
 --- config.lua / the backend.
 ---@param bufnr integer
----@param opts? { ctx_lines?: integer }
+---@param opts? { ctx_lines?: integer, current_lines?: string[], focus?: table, simulated_accept?: boolean }
 ---@return string
 function M.build_user_turn(bufnr, opts)
     opts = opts or {}
     local state = M.get_state(bufnr)
     local path = buf_path(bufnr)
-    local cur = get_lines(bufnr)
+    local cur = opts.current_lines or get_lines(bufnr)
 
     local parts = {}
 
@@ -576,6 +697,23 @@ function M.build_user_turn(bufnr, opts)
     -- inline marker measurably increased reverts and got copied into patches.
     local pos = vim.api.nvim_win_get_cursor(0)
     local row, col = pos[1], pos[2]
+    if opts.focus and opts.focus.row then
+        row = math.max(1, math.min(opts.focus.row, math.max(#cur, 1)))
+        col = opts.focus.col or 0
+    end
+    if opts.simulated_accept then
+        table.insert(
+            parts,
+            'Prediction focus: assume the user accepted the currently shown NES suggestion; predict the next edit after that simulated accept.'
+        )
+        table.insert(parts, '')
+    elseif opts.focus and opts.focus.kind == 'diagnostic' then
+        table.insert(
+            parts,
+            'Prediction focus: fix the most recent relevant LSP diagnostic. Prefer the smallest edit at or near the diagnostic line.'
+        )
+        table.insert(parts, '')
+    end
     table.insert(
         parts,
         ('Editor cursor: line %d, column %d (1-based). That line currently reads: `%s`'):format(
@@ -585,6 +723,12 @@ function M.build_user_turn(bufnr, opts)
         )
     )
     table.insert(parts, '')
+
+    local diagnostics = diagnostic_history_text(bufnr, opts.focus)
+    if diagnostics ~= '' then
+        table.insert(parts, diagnostics)
+        table.insert(parts, '')
+    end
 
     local all_edits = {}
     vim.list_extend(all_edits, state.seed)

@@ -48,9 +48,10 @@ end
 --- model can re-anchor its patch context.
 ---@param bufnr integer
 ---@param args table
+---@param lines_override? string[]
 ---@return string
-function M.read_result(bufnr, args)
-    local lines = vim.api.nvim_buf_get_lines(bufnr, 0, -1, false)
+function M.read_result(bufnr, args, lines_override)
+    local lines = lines_override or vim.api.nvim_buf_get_lines(bufnr, 0, -1, false)
     local n = #lines
     local s = math.max(1, math.floor(tonumber(args.start_line) or 1))
     local e = math.min(n, math.floor(tonumber(args.end_line) or n))

@@ -45,6 +45,25 @@ local function install_chat_stub()
     return captured
 end
 
+local function install_chat_queue_stub()
+    local captured = { requests = {} }
+    package.loaded['minuet.duet.chat'] = {
+        request = function(messages, tools, callback)
+            captured.calls = (captured.calls or 0) + 1
+            local request = {
+                messages = messages,
+                tools = tools,
+                callback = callback,
+            }
+            captured.requests[#captured.requests + 1] = request
+            captured.messages = messages
+            captured.tools = tools
+            captured.callback = callback
+        end,
+    }
+    return captured
+end
+
 local rename_patch = table.concat({
     '*** Begin Patch',
     '*** Update File: buf',
@@ -78,10 +97,7 @@ return {
             end, 1000, 'duet preview did not become visible')
 
             duet.action.apply()
-            helpers.expect_equal(
-                vim.api.nvim_buf_get_lines(bufnr, 0, -1, false),
-                { 'local x = new', 'local y = old' }
-            )
+            helpers.expect_equal(vim.api.nvim_buf_get_lines(bufnr, 0, -1, false), { 'local x = new', 'local y = old' })
             local entries = require('minuet.duet.session').diff_entries(bufnr)
             helpers.expect_equal(#entries, 1)
             helpers.expect_equal(entries[1].original, 'local x = old')
@@ -109,15 +125,9 @@ return {
 
             duet.action.dismiss()
             helpers.expect_falsy(duet.action.is_visible(), 'preview should clear after dismiss')
-            helpers.expect_equal(
-                vim.api.nvim_buf_get_lines(bufnr, 0, -1, false),
-                { 'local x = old', 'local y = old' }
-            )
+            helpers.expect_equal(vim.api.nvim_buf_get_lines(bufnr, 0, -1, false), { 'local x = old', 'local y = old' })
             duet.action.apply()
-            helpers.expect_equal(
-                vim.api.nvim_buf_get_lines(bufnr, 0, -1, false),
-                { 'local x = old', 'local y = old' }
-            )
+            helpers.expect_equal(vim.api.nvim_buf_get_lines(bufnr, 0, -1, false), { 'local x = old', 'local y = old' })
             helpers.delete_buffer(bufnr)
         end,
     },
@@ -150,10 +160,7 @@ return {
             end, 1000, 'preview did not render after read')
 
             duet.action.apply()
-            helpers.expect_equal(
-                vim.api.nvim_buf_get_lines(bufnr, 0, -1, false),
-                { 'local x = new', 'local y = old' }
-            )
+            helpers.expect_equal(vim.api.nvim_buf_get_lines(bufnr, 0, -1, false), { 'local x = new', 'local y = old' })
             helpers.delete_buffer(bufnr)
         end,
     },
@@ -227,7 +234,10 @@ return {
             duet.action.predict()
             -- A manual trigger must produce an edit; the system prompt says so.
             helpers.expect_match(captured.messages[1].content, 'MUST propose')
-            helpers.expect_falsy(captured.messages[1].content:find('auto%-triggered'), 'manual prompt must not offer the decline path')
+            helpers.expect_falsy(
+                captured.messages[1].content:find 'auto%-triggered',
+                'manual prompt must not offer the decline path'
+            )
 
             -- Model declines anyway: the loop should push back an error and re-request.
             captured.callback { message = { role = 'assistant', content = '*** No Edit' } }
@@ -244,10 +254,7 @@ return {
                 return duet.action.is_visible()
             end, 1000, 'preview did not render after the retry patch')
             duet.action.apply()
-            helpers.expect_equal(
-                vim.api.nvim_buf_get_lines(bufnr, 0, -1, false),
-                { 'local x = new', 'local y = old' }
-            )
+            helpers.expect_equal(vim.api.nvim_buf_get_lines(bufnr, 0, -1, false), { 'local x = new', 'local y = old' })
             helpers.delete_buffer(bufnr)
         end,
     },
@@ -316,7 +323,11 @@ return {
             helpers.expect_equal(msgs[1].role, 'system')
             local asst_idx
             for i, m in ipairs(msgs) do
-                if m.role == 'assistant' and type(m.content) == 'string' and m.content:find('local x = new', 1, true) then
+                if
+                    m.role == 'assistant'
+                    and type(m.content) == 'string'
+                    and m.content:find('local x = new', 1, true)
+                then
                     asst_idx = i
                 end
             end
@@ -326,6 +337,144 @@ return {
             -- the full current file still follows as the final user turn
             helpers.expect_equal(msgs[#msgs].role, 'user')
             helpers.expect_match(msgs[#msgs].content, 'Current file')
+            helpers.delete_buffer(bufnr)
+        end,
+    },
+    {
+        name = 'duet accept_or_next navigates and accepts inline chunks one at a time',
+        run = function()
+            helpers.setup_root_config {
+                duet = {
+                    preview = { cursor = '|' },
+                    session = { prefetch_after_preview = false },
+                },
+            }
+            local captured = install_chat_stub()
+            local duet = helpers.reload 'minuet.duet'
+            duet.setup()
+
+            local bufnr = helpers.create_buffer({ 'return alpha + beta' }, { 1, 0 })
+            require('minuet.duet.session').rebase(bufnr)
+            local patch = table.concat({
+                '*** Begin Patch',
+                '*** Update File: buf',
+                '@@',
+                '-return alpha + beta',
+                '+return omega + gamma',
+                '*** End Patch',
+            }, '\n')
+
+            duet.action.predict()
+            captured.callback(patch_call(patch))
+            helpers.wait_until(function()
+                return duet.action.is_visible()
+            end, 1000, 'preview did not render')
+
+            duet.action.accept_or_next()
+            helpers.expect_equal(vim.api.nvim_win_get_cursor(0), { 1, #'return ' })
+            helpers.expect_equal(vim.api.nvim_buf_get_lines(bufnr, 0, -1, false), { 'return alpha + beta' })
+
+            duet.action.accept_or_next()
+            helpers.expect_equal(vim.api.nvim_buf_get_lines(bufnr, 0, -1, false), { 'return omega + beta' })
+            helpers.expect_truthy(duet.action.is_visible(), 'remaining chunk should stay visible')
+
+            duet.action.accept_or_next()
+            helpers.expect_equal(vim.api.nvim_win_get_cursor(0), { 1, #'return omega + ' })
+
+            duet.action.accept_or_next()
+            helpers.expect_equal(vim.api.nvim_buf_get_lines(bufnr, 0, -1, false), { 'return omega + gamma' })
+            helpers.expect_falsy(duet.action.is_visible(), 'all chunks were accepted')
+            helpers.delete_buffer(bufnr)
+        end,
+    },
+    {
+        name = 'duet prefetch queues the simulated-after-accept prediction',
+        run = function()
+            helpers.setup_root_config {
+                duet = {
+                    preview = { cursor = '|' },
+                    session = {
+                        auto_trigger = true,
+                        diagnostic_auto_trigger = false,
+                        prefetch_after_preview = true,
+                    },
+                },
+            }
+            local captured = install_chat_queue_stub()
+            local duet = helpers.reload 'minuet.duet'
+            duet.setup()
+
+            local bufnr = helpers.create_buffer({ 'local x = old', 'local y = old' }, { 1, 12 })
+            require('minuet.duet.session').rebase(bufnr)
+            local y_patch = table.concat({
+                '*** Begin Patch',
+                '*** Update File: buf',
+                '@@',
+                '-local y = old',
+                '+local y = new',
+                '*** End Patch',
+            }, '\n')
+
+            duet.action.predict()
+            captured.requests[1].callback(patch_call(rename_patch, 'call_x'))
+            helpers.wait_until(function()
+                return duet.action.is_visible()
+            end, 1000, 'first preview did not render')
+            helpers.wait_until(function()
+                return captured.calls == 2
+            end, 1000, 'prefetch request did not fire')
+            helpers.expect_match(captured.requests[2].messages[#captured.requests[2].messages].content, 'local x = new')
+
+            captured.requests[2].callback(patch_call(y_patch, 'call_y'))
+            vim.wait(50, function()
+                return false
+            end, 10)
+
+            duet.action.apply()
+            helpers.expect_equal(vim.api.nvim_buf_get_lines(bufnr, 0, -1, false), { 'local x = new', 'local y = old' })
+            helpers.expect_truthy(duet.action.is_visible(), 'queued prediction should be shown after first accept')
+
+            duet.action.apply()
+            helpers.expect_equal(vim.api.nvim_buf_get_lines(bufnr, 0, -1, false), { 'local x = new', 'local y = new' })
+            helpers.delete_buffer(bufnr)
+        end,
+    },
+    {
+        name = 'duet auto-trigger sends a diagnostic-focused request with diagnostic history',
+        run = function()
+            helpers.setup_root_config {
+                duet = {
+                    preview = { cursor = '|' },
+                    session = {
+                        auto_trigger = true,
+                        diagnostic_auto_trigger = true,
+                    },
+                },
+            }
+            local captured = install_chat_queue_stub()
+            local duet = helpers.reload 'minuet.duet'
+            duet.setup()
+
+            local bufnr = helpers.create_buffer({ 'local x = nil', 'return x.foo' }, { 1, 0 })
+            require('minuet.duet.session').rebase(bufnr)
+            local diagnostic = {
+                lnum = 1,
+                col = 9,
+                severity = vim.diagnostic.severity.ERROR,
+                message = 'attempt to index nil value',
+                source = 'lua_ls',
+            }
+            require('minuet.duet.session').note_diagnostics(bufnr, { diagnostic })
+
+            vim.api.nvim_exec_autocmds('TextChanged', { buffer = bufnr })
+            helpers.wait_until(function()
+                return captured.calls == 2
+            end, 1000, 'cursor + diagnostic auto requests should fire')
+
+            local diagnostic_user = captured.requests[2].messages[#captured.requests[2].messages].content
+            helpers.expect_match(diagnostic_user, 'Prediction focus: fix')
+            helpers.expect_match(diagnostic_user, 'Focus diagnostic: line 2, column 10')
+            helpers.expect_match(diagnostic_user, 'attempt to index nil value')
             helpers.delete_buffer(bufnr)
         end,
     },

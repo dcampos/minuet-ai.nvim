@@ -1504,7 +1504,13 @@ The Minuet duet command provides manual next-edit prediction controls:
 - `:Minuet duet predict`: Request an NES prediction for the current editable
   region and show it as a preview.
 - `:Minuet duet apply`: Apply the current duet prediction.
+- `:Minuet duet accept_or_next`: Move to the next approval chunk, or accept the
+  chunk under the cursor.
+- `:Minuet duet cycle`: Reject the current prediction and request a different
+  one.
+- `:Minuet duet toggle`: Toggle duet auto-trigger for the current session.
 - `:Minuet duet dismiss`: Dismiss the current duet prediction preview.
+- `:Minuet duet inspect`: Show recent duet request/response history.
 
 ## `Minuet lsp`
 
@@ -1522,18 +1528,20 @@ The Minuet LSP command provides commands for managing the in-process LSP server:
 `Minuet duet` is Minuet's highly experimental next-edit prediction (NES)
 feature.
 
-Basic usage is manual. Bind the duet commands to your preferred keymaps, then:
+Basic usage is manual. Bind the duet actions to your preferred keymaps, then:
 
 1. Trigger `:Minuet duet predict` to request a prediction for the current edit.
 2. Review the preview rendered in the buffer.
-3. Apply it with `:Minuet duet apply` or discard it with
-   `:Minuet duet dismiss`.
+3. Use `require('minuet.duet').action.accept_or_next` to move through and accept
+   approval chunks, or apply the full prediction with `:Minuet duet apply`.
+4. Discard it with `:Minuet duet dismiss`.
 
 Example keymaps:
 
 ```lua
 vim.keymap.set('n', '<leader>mp', '<cmd>Minuet duet predict<cr>', { desc = 'Minuet duet predict' })
 vim.keymap.set('n', '<leader>ma', '<cmd>Minuet duet apply<cr>', { desc = 'Minuet duet apply' })
+vim.keymap.set('n', '<leader>mn', require('minuet.duet').action.accept_or_next, { desc = 'Minuet duet accept or next' })
 vim.keymap.set('n', '<leader>md', '<cmd>Minuet duet dismiss<cr>', { desc = 'Minuet duet dismiss' })
 vim.keymap.set('i', '<A-z>', '<cmd>Minuet duet predict<cr>', { desc = 'Minuet duet predict' })
 vim.keymap.set('i', '<A-a>', '<cmd>Minuet duet apply<cr>', { desc = 'Minuet duet apply' })
@@ -1580,8 +1588,10 @@ This feature is highly experimental:
   lack local GPU resources for testing.
 - Comparable small models from competitors of Google—`claude-haiku-4.5` and
   `gpt-5.4-mini`—perform poorly.
-- Given completion latency constraints, automatic duet prediction is not
-  implemented.
+- Auto-triggered requests can be enabled with `duet.session.auto_trigger`. When
+  enabled, duet can prefetch the next prediction by simulating acceptance of the
+  current one, and can also issue a diagnostic-focused request from recent LSP
+  diagnostics.
 
 It is recommended to configure the thinking levels of the models; refer to the
 [provider sections](#providers) for guidance on managing thinking settings for
@@ -1595,10 +1605,7 @@ large enough to cover the full rewritten region.
 
 ## TODO
 
-- [ ] Implement a proper diff mechanism to include recent edit changes in prompts.
 - [ ] Add support for specialized NES models (Zeta, Sweep).
-- [ ] Integrate with Inception's hosted API.
-- [ ] Implement automatically triggered duet prediction.
 
 ## Default Config
 
@@ -1623,8 +1630,19 @@ require('minuet').setup {
             cursor_position = '<cursor_position/>', -- Marker the model must preserve exactly once to indicate the final cursor position.
         },
         preview = {
-            mode = 'inline', -- Preview rendering mode: 'inline' (legacy EOL text), 'side_by_side', or 'virtual_lines'.
+            mode = 'inline', -- Legacy option. Preview rendering is heuristic and chunk-based.
             cursor = '', -- Virtual marker shown at the predicted cursor location in the preview.
+            marker = ' ', -- Highlighted marker for hidden multi-line chunks.
+            block_chunk_size = 10, -- Maximum virtual-line rows shown in one approval chunk.
+            inline_max_groups = 2, -- Lines with more edit groups render as virtual-line blocks.
+            inline_max_edit_ratio = 0.9, -- Large same-line edits above this ratio render as blocks.
+            line_pair_min_similarity = 0.35, -- Minimum line similarity for inline pairing inside hunks.
+        },
+        session = {
+            auto_trigger = false, -- Fire duet predictions from normal-mode edit events.
+            prefetch_after_preview = true, -- With auto-trigger, request the next edit for the simulated accepted state.
+            diagnostic_auto_trigger = true, -- With auto-trigger, also request a diagnostic-focused prediction.
+            partial_accept_level = 4, -- Keep compatible previews after partial user acceptance.
         },
         provider_options = {
             openai = {
@@ -1705,7 +1723,13 @@ The duet module provides functions to programmatically control duet prediction:
 {
     require('minuet.duet').action.predict,
     require('minuet.duet').action.apply,
+    require('minuet.duet').action.accept_or_next,
+    require('minuet.duet').action.accept_chunk,
+    require('minuet.duet').action.next_chunk,
+    require('minuet.duet').action.cycle,
+    require('minuet.duet').action.toggle,
     require('minuet.duet').action.dismiss,
+    require('minuet.duet').action.inspect,
     -- Check if a duet preview is currently visible in the current buffer
     require('minuet.duet').action.is_visible,
 }

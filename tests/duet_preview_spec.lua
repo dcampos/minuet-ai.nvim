@@ -93,114 +93,12 @@ return {
         end,
     },
     {
-        name = 'duet.preview renders replacements inline by default',
+        name = 'duet.preview renders two word changes inline',
         run = function()
             helpers.setup_root_config {
                 duet = {
                     preview = {
                         cursor = '|',
-                    },
-                },
-            }
-
-            local preview = helpers.reload 'minuet.duet.preview'
-            local bufnr = helpers.create_buffer({ 'alpha' }, { 1, 0 })
-            local state = {
-                range = {
-                    start_row = 0,
-                    end_row = 1,
-                },
-                original_lines = { 'alpha' },
-                proposed_lines = { 'omega' },
-                proposed_cursor = {
-                    row_offset = 0,
-                    col = 2,
-                },
-            }
-
-            preview.render(bufnr, state)
-
-            local extmarks = get_extmarks(bufnr, preview.ns_id)
-            helpers.expect_equal(#extmarks, 1)
-            helpers.expect_equal(extmarks[1][4].hl_group, 'MinuetDuetDelete')
-            helpers.expect_equal(extmarks[1][4].virt_text_pos, 'eol')
-            helpers.expect_equal(extmarks[1][4].virt_text, {
-                { 'om', 'MinuetDuetAdd' },
-                { '|', 'MinuetDuetCursor' },
-                { 'ega', 'MinuetDuetAdd' },
-            })
-
-            helpers.delete_buffer(bufnr)
-        end,
-    },
-    {
-        name = 'duet.preview side_by_side renders replacements as inline spans',
-        run = function()
-            helpers.setup_root_config {
-                duet = {
-                    preview = {
-                        cursor = '|',
-                        mode = 'side_by_side',
-                    },
-                },
-            }
-
-            local preview = helpers.reload 'minuet.duet.preview'
-            local bufnr = helpers.create_buffer({ 'aa', 'bbbb' }, { 1, 0 })
-            local state = {
-                range = {
-                    start_row = 0,
-                    end_row = 2,
-                },
-                original_lines = { 'aa', 'bbbb' },
-                proposed_lines = { 'XX', 'YYYY' },
-                proposed_cursor = {
-                    row_offset = 1,
-                    col = 2,
-                },
-            }
-
-            preview.render(bufnr, state)
-
-            local extmarks = get_extmarks(bufnr, preview.ns_id)
-            table.sort(extmarks, function(a, b)
-                if a[2] ~= b[2] then
-                    return a[2] < b[2]
-                end
-                if a[3] ~= b[3] then
-                    return a[3] < b[3]
-                end
-                return a[1] < b[1]
-            end)
-            helpers.expect_equal(#extmarks, 4)
-            helpers.expect_equal(extmarks[1][4].hl_group, 'MinuetDuetDelete')
-            helpers.expect_equal(extmarks[1][4].end_col, 2)
-            helpers.expect_equal(extmarks[2][3], 2)
-            helpers.expect_equal(extmarks[2][4].virt_text_pos, 'inline')
-            helpers.expect_equal(extmarks[2][4].virt_text, {
-                { 'XX', 'MinuetDuetAdd' },
-            })
-            helpers.expect_equal(extmarks[3][4].hl_group, 'MinuetDuetDelete')
-            helpers.expect_equal(extmarks[3][4].end_col, 4)
-            helpers.expect_equal(extmarks[4][3], 4)
-            helpers.expect_equal(extmarks[4][4].virt_text_pos, 'inline')
-            helpers.expect_equal(extmarks[4][4].virt_text, {
-                { 'YY', 'MinuetDuetAdd' },
-                { '|', 'MinuetDuetCursor' },
-                { 'YY', 'MinuetDuetAdd' },
-            })
-
-            helpers.delete_buffer(bufnr)
-        end,
-    },
-    {
-        name = 'duet.preview side_by_side shows each changed word as a red-green pair',
-        run = function()
-            helpers.setup_root_config {
-                duet = {
-                    preview = {
-                        cursor = '|',
-                        mode = 'side_by_side',
                     },
                 },
             }
@@ -232,52 +130,54 @@ return {
             local beta_col = old_line:find('beta', 1, true) - 1
             helpers.expect_equal(#extmarks, 4)
             helpers.expect_equal(extmarks[1][3], alpha_col)
-            helpers.expect_equal(extmarks[1][4].hl_group, 'MinuetDuetDelete')
+            helpers.expect_equal(extmarks[1][4].hl_group, 'MinuetDuetDeleteText')
             helpers.expect_equal(extmarks[1][4].end_col, alpha_col + #'alpha')
             helpers.expect_equal(extmarks[2][3], alpha_col + #'alpha')
             helpers.expect_equal(extmarks[2][4].virt_text, {
-                { 'omega', 'MinuetDuetAdd' },
+                { 'omega', 'MinuetDuetAddText' },
             })
             helpers.expect_equal(extmarks[3][3], beta_col)
-            helpers.expect_equal(extmarks[3][4].hl_group, 'MinuetDuetDelete')
+            helpers.expect_equal(extmarks[3][4].hl_group, 'MinuetDuetDeleteText')
             helpers.expect_equal(extmarks[3][4].end_col, beta_col + #'beta')
             helpers.expect_equal(extmarks[4][3], beta_col + #'beta')
             helpers.expect_equal(extmarks[4][4].virt_text, {
-                { 'gamma', 'MinuetDuetAdd' },
+                { 'gamma', 'MinuetDuetAddText' },
             })
 
             helpers.delete_buffer(bufnr)
         end,
     },
     {
-        name = 'duet.preview side_by_side renders insert-only and delete-only spans locally',
+        name = 'duet.preview renders repeated same-segment additions inline',
         run = function()
             helpers.setup_root_config {
                 duet = {
                     preview = {
                         cursor = '|',
-                        mode = 'side_by_side',
                     },
                 },
             }
 
             local preview = helpers.reload 'minuet.duet.preview'
             local bufnr = helpers.create_buffer({
-                'tags: article.tags',
-                'if (article.tags == null) {',
+                'vim.nvim_creat',
+                'vim.nvim_buf',
+                'vim.nvim_win',
             }, { 1, 0 })
             local state = {
                 range = {
                     start_row = 0,
-                    end_row = 2,
+                    end_row = 3,
                 },
                 original_lines = {
-                    'tags: article.tags',
-                    'if (article.tags == null) {',
+                    'vim.nvim_creat',
+                    'vim.nvim_buf',
+                    'vim.nvim_win',
                 },
                 proposed_lines = {
-                    'tags: article.tags ?? []',
-                    'if (article.tags) {',
+                    'vim.api.nvim_creat',
+                    'vim.api.nvim_buf',
+                    'vim.api.nvim_win',
                 },
             }
 
@@ -293,45 +193,42 @@ return {
                 end
                 return a[1] < b[1]
             end)
-
-            helpers.expect_equal(#extmarks, 2)
-            helpers.expect_equal(extmarks[1][2], 0)
-            helpers.expect_equal(extmarks[1][3], #'tags: article.tags')
-            helpers.expect_equal(extmarks[1][4].virt_text, {
-                { ' ?? []', 'MinuetDuetAdd' },
-            })
-            helpers.expect_equal(extmarks[2][2], 1)
-            helpers.expect_equal(extmarks[2][3], ('if (article.tags'):len())
-            helpers.expect_equal(extmarks[2][4].hl_group, 'MinuetDuetDelete')
-            helpers.expect_equal(extmarks[2][4].end_col, ('if (article.tags == null'):len())
+            helpers.expect_equal(#extmarks, 3)
+            for i, extmark in ipairs(extmarks) do
+                helpers.expect_equal(extmark[2], i - 1)
+                helpers.expect_equal(extmark[3], #'vim.')
+                helpers.expect_equal(extmark[4].virt_text, {
+                    { 'api.', 'MinuetDuetAddText' },
+                })
+            end
 
             helpers.delete_buffer(bufnr)
         end,
     },
     {
-        name = 'duet.preview virtual_lines renders red source lines and green proposed virtual lines',
+        name = 'duet.preview renders unrelated one-line replacements as blocks',
         run = function()
             helpers.setup_root_config {
                 duet = {
                     preview = {
                         cursor = '|',
-                        mode = 'virtual_lines',
                     },
                 },
             }
 
             local preview = helpers.reload 'minuet.duet.preview'
-            local old_line = [[content_suffix = "\n" + "\n".join(lines[13:16]) + "\n"]]
-            local new_line = [[content_suffix = "\n" + "\n".join(lines[14:19]) + "\n"]]
-            local inserted_line = [[assert content_suffix.strip(), "content suffix is empty -- doc too short"]]
-            local bufnr = helpers.create_buffer({ old_line }, { 1, 0 })
+            local bufnr = helpers.create_buffer({ 'alpha' }, { 1, 0 })
             local state = {
                 range = {
                     start_row = 0,
                     end_row = 1,
                 },
-                original_lines = { old_line },
-                proposed_lines = { new_line, inserted_line },
+                original_lines = { 'alpha' },
+                proposed_lines = { 'omega' },
+                proposed_cursor = {
+                    row_offset = 0,
+                    col = 2,
+                },
             }
 
             preview.render(bufnr, state)
@@ -339,48 +236,160 @@ return {
             local extmarks = get_extmarks(bufnr, preview.ns_id)
             local line_mark
             local virt_mark
-            local deleted_spans = {}
             for _, extmark in ipairs(extmarks) do
-                local details = extmark[4]
-                if details.hl_group == 'MinuetDuetDelete' then
+                if extmark[4].hl_group == 'MinuetDuetDelete' then
                     line_mark = extmark
-                elseif details.virt_lines then
+                elseif extmark[4].virt_lines then
                     virt_mark = extmark
-                elseif details.hl_group == 'MinuetDuetDeleteText' then
-                    table.insert(deleted_spans, extmark)
                 end
             end
-            table.sort(deleted_spans, function(a, b)
-                return a[3] < b[3]
-            end)
-
-            local first_old_col = old_line:find('13', 1, true) - 1
-            local second_old_col = old_line:find('16', 1, true) - 1
-            helpers.expect_equal(#extmarks, 4)
-            helpers.expect_equal(line_mark[4].hl_group, 'MinuetDuetDelete')
-            helpers.expect_equal(line_mark[4].end_col, #old_line)
-            helpers.expect_equal(line_mark[4].hl_eol, true)
-            helpers.expect_equal(line_mark[4].priority, 100)
-            helpers.expect_equal(#deleted_spans, 2)
-            helpers.expect_equal(deleted_spans[1][3], first_old_col)
-            helpers.expect_equal(deleted_spans[1][4].end_col, first_old_col + #'13')
-            helpers.expect_equal(deleted_spans[1][4].priority, 110)
-            helpers.expect_equal(deleted_spans[2][3], second_old_col)
-            helpers.expect_equal(deleted_spans[2][4].end_col, second_old_col + #'16')
-            helpers.expect_equal(deleted_spans[2][4].priority, 110)
+            helpers.expect_equal(line_mark[4].end_col, #'alpha')
             helpers.expect_equal(virt_mark[4].virt_lines, {
                 {
-                    { [[content_suffix = "\n" + "\n".join(lines[]], 'MinuetDuetAdd' },
-                    { '14', 'MinuetDuetAddText' },
-                    { ':', 'MinuetDuetAdd' },
-                    { '19', 'MinuetDuetAddText' },
-                    { ']) + "\\n"', 'MinuetDuetAdd' },
-                },
-                {
-                    { inserted_line, 'MinuetDuetAdd' },
+                    { 'om', 'MinuetDuetAddText' },
+                    { '|', 'MinuetDuetCursor' },
+                    { 'ega', 'MinuetDuetAddText' },
                 },
             })
-            helpers.expect_equal(virt_mark[4].virt_lines_above, false)
+
+            helpers.delete_buffer(bufnr)
+        end,
+    },
+    {
+        name = 'duet.preview hides multiline blocks behind a marker until selected',
+        run = function()
+            helpers.setup_root_config {
+                duet = {
+                    preview = {
+                        cursor = '|',
+                    },
+                },
+            }
+
+            local preview = helpers.reload 'minuet.duet.preview'
+            local bufnr = helpers.create_buffer({ 'one', 'two', 'three' }, { 1, 0 })
+            local state = {
+                range = {
+                    start_row = 0,
+                    end_row = 3,
+                },
+                original_lines = { 'one', 'two', 'three' },
+                proposed_lines = { 'alpha', 'beta', 'gamma' },
+            }
+
+            preview.render(bufnr, state)
+            local extmarks = get_extmarks(bufnr, preview.ns_id)
+            helpers.expect_equal(#extmarks, 1)
+            helpers.expect_equal(extmarks[1][4].virt_text, {
+                { ' ', 'MinuetDuetMarker' },
+            })
+            helpers.expect_falsy(extmarks[1][4].virt_lines)
+
+            preview.select_next_chunk(bufnr, state)
+            extmarks = get_extmarks(bufnr, preview.ns_id)
+            local virt_mark
+            for _, extmark in ipairs(extmarks) do
+                if extmark[4].virt_lines then
+                    virt_mark = extmark
+                end
+            end
+            helpers.expect_truthy(virt_mark, 'selected multiline block should render virtual lines')
+            helpers.expect_equal(#virt_mark[4].virt_lines, 3)
+
+            helpers.delete_buffer(bufnr)
+        end,
+    },
+    {
+        name = 'duet.preview keeps strong whitespace highlights in block diffs',
+        run = function()
+            helpers.setup_root_config {
+                duet = {
+                    preview = {
+                        cursor = '|',
+                        inline_max_groups = 0,
+                    },
+                },
+            }
+
+            local preview = helpers.reload 'minuet.duet.preview'
+            local old_line = 'local x=1'
+            local new_line = 'local x = 1'
+            local bufnr = helpers.create_buffer({ old_line }, { 1, 0 })
+            local state = {
+                range = {
+                    start_row = 0,
+                    end_row = 1,
+                },
+                original_lines = { old_line },
+                proposed_lines = { new_line },
+            }
+
+            preview.render(bufnr, state)
+
+            local extmarks = get_extmarks(bufnr, preview.ns_id)
+            local virt_mark
+            for _, extmark in ipairs(extmarks) do
+                if extmark[4].virt_lines then
+                    virt_mark = extmark
+                end
+            end
+            helpers.expect_equal(virt_mark[4].virt_lines, {
+                {
+                    { 'local x', 'MinuetDuetAdd' },
+                    { ' = ', 'MinuetDuetAddText' },
+                    { '1', 'MinuetDuetAdd' },
+                },
+            })
+
+            helpers.delete_buffer(bufnr)
+        end,
+    },
+    {
+        name = 'duet.preview treesitter-colors a proposed block when ts_highlight is on',
+        run = function()
+            helpers.setup_root_config {
+                duet = {
+                    preview = {
+                        cursor = '|',
+                        ts_highlight = true,
+                    },
+                },
+            }
+
+            local preview = helpers.reload 'minuet.duet.preview'
+            local bufnr = helpers.create_buffer({ 'one', 'two' }, { 1, 0 })
+            vim.bo[bufnr].filetype = 'lua'
+            local state = {
+                range = { start_row = 0, end_row = 2 },
+                original_lines = { 'one', 'two' },
+                proposed_lines = { 'local a = 1', 'local b = 2' },
+            }
+
+            preview.render(bufnr, state)
+            -- Multi-line blocks are hidden behind a marker until selected.
+            preview.select_next_chunk(bufnr, state)
+
+            local virt
+            for _, extmark in ipairs(get_extmarks(bufnr, preview.ns_id)) do
+                if extmark[4].virt_lines then
+                    virt = extmark[4].virt_lines
+                end
+            end
+            helpers.expect_truthy(virt, 'selected block should render virtual lines')
+
+            -- At least one proposed chunk must carry a treesitter-derived group
+            -- (the derived dim/tint group, or a raw @capture) rather than the
+            -- flat add color.
+            local found_ts = false
+            for _, line in ipairs(virt) do
+                for _, ch in ipairs(line) do
+                    local hl = ch[2] or ''
+                    if hl:find('MinuetDuetTs', 1, true) or hl:sub(1, 1) == '@' then
+                        found_ts = true
+                    end
+                end
+            end
+            helpers.expect_truthy(found_ts, 'expected treesitter-derived groups in the proposed block')
 
             helpers.delete_buffer(bufnr)
         end,

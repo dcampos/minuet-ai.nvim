@@ -207,7 +207,6 @@ local function make_inception_edit_options()
         snippet_count = 3,
         snippet_radius = 10,
         max_siblings = 4,
-        git_diff_max_bytes = 8000,
         max_tokens = 1000,
         optional = {},
     }
@@ -305,7 +304,7 @@ end
 ---@field editable_region minuet.DuetEditableRegion
 ---@field non_editable_region minuet.DuetNonEditableRegion
 ---@field markers { editable_region_start: string, editable_region_end: string, cursor_position: string }
----@field preview { mode: string, cursor: string }
+---@field preview { mode: string, cursor: string, marker: string, block_chunk_size: integer, inline_max_groups: integer, inline_max_edit_ratio: number, line_pair_min_similarity: number, ts_highlight: boolean, ts_dim: boolean, ts_blend: integer, ts_add_bg: integer }
 ---@field provider_options table<string, table>
 local M = {
     -- NES (apply_patch) is the active duet design; default to gpt-oss via OpenRouter.
@@ -325,6 +324,20 @@ local M = {
     preview = {
         mode = 'inline',
         cursor = '\u{f246}',
+        marker = ' ',
+        block_chunk_size = 10,
+        inline_max_groups = 2,
+        inline_max_edit_ratio = 0.9,
+        line_pair_min_similarity = 0.35,
+        -- Treesitter foreground coloring of proposed (added) block text. Off by
+        -- default. When on, multi-line proposed blocks render with (dimmed)
+        -- syntax colors over a subtle "added" background tint instead of the
+        -- flat add color. Small inline fragments stay flat (too little context
+        -- to parse reliably). See lua/minuet/duet/ts_highlight.lua.
+        ts_highlight = false,
+        ts_dim = true,
+        ts_blend = 35,
+        ts_add_bg = 0x294b38,
     },
     -- NES session settings (apply_patch flow). See duet-nes-spec.md.
     session = {
@@ -358,6 +371,10 @@ local M = {
         -- Safety valve for auto-triggered next-edit requests. Manual requests
         -- bypass this; 0 disables the limit. Edit capture itself is immediate.
         max_auto_requests_per_second = 10,
+        prefetch_after_preview = true,
+        diagnostic_auto_trigger = true,
+        diagnostic_history_max = 20,
+        partial_accept_level = 4,
         -- Mercury edit_diff_history is an append-only deque: keep the last N
         -- uncoalesced edits, including model predictions the user accepted.
         edit_history_max_entries = 20,
