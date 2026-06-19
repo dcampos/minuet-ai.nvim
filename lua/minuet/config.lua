@@ -322,18 +322,14 @@ local M = {
         -- almost always cached, so it is cheap. Requires context_before_chars; 0
         -- disables backward reuse (only forward typing keeps the anchor warm).
         context_back_slack = 0,
-        -- Suffix (after-cursor) size control for FIM requests. The prefix grows
-        -- and stays warm on the server's KV cache via the anchor, but the
-        -- suffix is rarely cached (it shifts as the prefix grows), so every
-        -- char of suffix tends to be paid fresh. This lets you bound it
-        -- independently of the prefix (it is a function of the actual prefix
-        -- length in the buffer, which in a fresh/short file is below the cap):
-        --   nil      -> no extra cap (suffix sized by context_window/ratio)
-        --   number   -> hard cap of that many chars
-        --   function -> fun(prefix_chars: integer): integer returns the suffix
-        --               char budget given the current prefix length. Use a
-        --               sub-linear curve (e.g. sqrt) so the suffix grows fast
-        --               at first then levels off at a small cap.
+        -- Suffix (after-cursor) char cap for FIM requests, bounded independently
+        -- of the prefix. A constant only -- the suffix must stay byte-stable as
+        -- you type, because SPM models (Codestral) lead the prompt with the
+        -- suffix, so a suffix that resized with the growing prefix would cold-bust
+        -- the whole server cache every keystroke. The suffix is otherwise cheap
+        -- to keep small: it is rarely the cached part anyway.
+        --   nil    -> no extra cap (suffix sized by context_window/ratio)
+        --   number -> hard cap of that many chars
         context_after_chars = nil,
         -- Context anchor reuse: how many chars the request prefix is allowed to
         -- send past the warm shared prefix before we re-anchor ("snap"). The

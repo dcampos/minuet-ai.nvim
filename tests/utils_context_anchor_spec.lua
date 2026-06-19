@@ -146,7 +146,7 @@ return {
     },
 
     {
-        name = 'utils.get_context prefix-only snaps when only the suffix changed',
+        name = 'utils.get_context re-pins when only the suffix changed (hard gate)',
         run = function()
             local bufnr, utils = setup_long_buffer(200, 200, {
                 config = {
@@ -176,27 +176,18 @@ return {
 
             local context = utils.get_context(utils.make_cmp_context(), nil, anchor)
 
-            -- The warm prefix start is still reused (its KV is unaffected by an
-            -- edit below the cursor), but the stale suffix is dropped for a
-            -- fresh one cut from the live buffer.
-            helpers.expect_truthy(context.opts.anchored, 'prefix is still warm, so we anchor')
-            helpers.expect_truthy(context.opts.suffix_fresh, 'suffix was rebuilt fresh')
-            helpers.expect_equal(
-                context.lines_before:sub(1, #prev_before),
-                prev_before,
-                'reused prefix keeps the anchored start'
-            )
-            helpers.expect_falsy(
-                context.lines_after == prev_after,
-                'stale suffix must not be reused after a change below the cursor'
-            )
+            -- The suffix is a hard gate: a changed suffix cold-busts the SPM
+            -- server cache, so we re-pin a fresh anchor here rather than reuse a
+            -- warm prefix behind a stale suffix.
+            helpers.expect_falsy(context.opts.anchored, 'a changed suffix forces a re-pin')
+            helpers.expect_falsy(context.opts.suffix_fresh, 'no prefix-only snap anymore')
 
             helpers.delete_buffer(bufnr)
         end,
     },
 
     {
-        name = 'utils.get_context snaps back to a warm prefix after a forward jump',
+        name = 'utils.get_context re-pins after a forward jump (suffix changed)',
         run = function()
             -- Long single-block buffer so the cursor sits deep enough that the
             -- prefix is truncated (anchor engages). 600 before / 600 after with
@@ -216,20 +207,14 @@ return {
             }
 
             -- Jump the cursor forward into the next line (a paragraph-down style
-            -- move): the prefix above is unchanged content, but the cursor now
-            -- sits inside the old suffix region, so the pinned suffix no longer
-            -- matches and must be rebuilt fresh.
-            local prev_after = anchor.prev_lines_after
+            -- move): the prefix above is unchanged, but the cursor now sits
+            -- inside the old suffix region, so the suffix changed. The hard gate
+            -- re-pins rather than reuse the warm prefix behind a stale suffix.
             vim.api.nvim_win_set_cursor(0, { 2, 100 })
 
             local context = utils.get_context(utils.make_cmp_context(), nil, anchor)
 
-            helpers.expect_truthy(context.opts.anchored, 'forward jump still reuses the warm prefix')
-            helpers.expect_truthy(context.opts.suffix_fresh, 'fresh suffix at the new cursor')
-            helpers.expect_falsy(
-                context.lines_after == prev_after,
-                'the stale pre-jump suffix is not reused'
-            )
+            helpers.expect_falsy(context.opts.anchored, 'a forward jump changes the suffix, so we re-pin')
 
             helpers.delete_buffer(bufnr)
         end,
@@ -370,7 +355,7 @@ return {
     },
 
     {
-        name = 'utils.get_context reuses a warm anchor when the cursor rewinds within the floor',
+        name = 'utils.get_context re-pins on a backward rewind (suffix changed)',
         run = function()
             helpers.setup_root_config {
                 context_window = 120,
@@ -383,6 +368,10 @@ return {
             helpers.expect_equal(vim.fn.strchars(baseline.lines_before), 100)
             helpers.expect_truthy(baseline.opts.is_incomplete_before)
 
+            -- A rewind grows the after-cursor text, so the suffix no longer
+            -- matches the snap -> hard gate -> re-pin, even though the prefix
+            -- start is still warm. (The floor machinery is kept but inert: the
+            -- suffix gate decides this case now.)
             vim.api.nvim_win_set_cursor(0, { 1, 410 })
             local context = utils.get_context(utils.make_cmp_context(), nil, {
                 prev_lines_before = baseline.lines_before,
@@ -391,14 +380,7 @@ return {
                 floor = 60,
             })
 
-            helpers.expect_truthy(context.opts.anchored, 'rewind within floor should reuse the anchor')
-            helpers.expect_truthy(context.opts.suffix_fresh, 'rewind rebuilds the stale suffix')
-            helpers.expect_equal(vim.fn.strchars(context.lines_before), 60)
-            helpers.expect_equal(
-                baseline.lines_before:sub(1, #context.lines_before),
-                context.lines_before,
-                'rewound prefix keeps the same anchor start'
-            )
+            helpers.expect_falsy(context.opts.anchored, 'a rewind changes the suffix, so we re-pin')
 
             helpers.delete_buffer(bufnr)
         end,

@@ -618,9 +618,9 @@ end
 --- (virtualtext.context_after_chars), translate the two into the combined
 --- window/ratio that get_context already understands: a window of
 --- before + max_suffix split so the before side gets exactly `before`. The
---- per-request suffix is then shaped down to context_after_chars(actual_prefix)
---- by the post-anchor pass in trigger. No-op (returns cfg) when
---- context_before_chars is unset -- the legacy single-budget model.
+--- per-request suffix is then capped at the constant context_after_chars by the
+--- post-anchor pass in trigger. No-op (returns cfg) when context_before_chars
+--- is unset -- the legacy single-budget model.
 ---@param cfg table effective config
 ---@return table cfg a sizing view of cfg (never mutates the input)
 local function sizing_cfg(cfg)
@@ -635,14 +635,11 @@ local function sizing_cfg(cfg)
     -- `before`; the pinned request size is before + context_back_slack.
     local pin = before + math.max(0, vt.context_back_slack or 0)
     -- Ceiling on the suffix so the combined window still leaves the prefix its
-    -- full pin budget. context_after_chars is sub-linear/capped, so its value at
-    -- the largest prefix we could send (pin + growth_slack while anchored) is its
-    -- ceiling.
+    -- full pin budget. context_after_chars is a constant cap (it must stay
+    -- byte-stable across requests -- see the post-anchor pass in trigger).
     local after = vt.context_after_chars
     local max_after
-    if type(after) == 'function' then
-        max_after = after(pin + (vt.context_growth_slack or 0))
-    elseif type(after) == 'number' then
+    if type(after) == 'number' then
         max_after = after
     else
         max_after = math.floor(cfg.context_window * (1 - cfg.context_ratio))
@@ -749,15 +746,15 @@ local function trigger(bufnr, overrides, is_retry, is_manual)
     -- Bound the suffix independently of the prefix. The prefix is kept warm on
     -- the server's KV cache by the anchor, but the suffix is rarely cached, so
     -- a smaller suffix directly cuts the un-cached token cost per request.
+    -- A constant cap only: the suffix must stay byte-stable across requests or a
+    -- changed suffix cold-busts the server cache (SPM). A prefix-dependent budget
+    -- would resize the suffix as the prefix grows and self-bust every keystroke.
     local after_opt = (cfg.virtualtext or {}).context_after_chars
-    if after_opt ~= nil then
-        local budget = type(after_opt) == 'function' and after_opt(vim.fn.strchars(context.lines_before)) or after_opt
-        if type(budget) == 'number' and budget >= 0 then
-            local full_after = context.lines_after
-            if vim.fn.strchars(full_after) > budget then
-                context.lines_after = vim.fn.strcharpart(full_after, 0, budget)
-                context.opts.is_incomplete_after = true
-            end
+    if type(after_opt) == 'number' and after_opt >= 0 then
+        local full_after = context.lines_after
+        if vim.fn.strchars(full_after) > after_opt then
+            context.lines_after = vim.fn.strcharpart(full_after, 0, after_opt)
+            context.opts.is_incomplete_after = true
         end
     end
     -- Virtual text fires one request per keystroke that misses the cache and

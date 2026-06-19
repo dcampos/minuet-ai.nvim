@@ -437,10 +437,12 @@ end
 --- before the prefix segment, appending characters at the cursor edge only
 --- invalidates the trailing few tokens. Without an anchor, the legacy window
 --- slides on every keystroke and every request is a fresh cache miss. With
---- one, we extend `prev_lines_before` by the typed-since chars and pin
---- `prev_lines_after` until the suffix content stops matching or growth_slack
---- is exceeded — at which point we re-anchor by falling back to the standard
---- fresh window (single chunked invalidation rather than per-char).
+--- one, we reuse the window only while the suffix still matches byte-for-byte
+--- (a hard gate — SPM models lead the prompt with the suffix, so a changed
+--- suffix cold-busts the whole cache) and extend `prev_lines_before` by the
+--- typed-since chars within growth_slack. When the suffix changes or the prefix
+--- drifts past the slack we re-anchor with a fresh window (single chunked
+--- invalidation rather than per-char).
 ---@param cmp_context table Cursor + cursor_before_line/cursor_after_line.
 ---@param cfg? table Effective config; overrides context_window/context_ratio.
 ---@param anchor? minuet.ContextAnchor Previous request hint for cache reuse.
@@ -480,65 +482,51 @@ function M.get_context(cmp_context, cfg, anchor)
         and n_chars_before >= config.context_window * config.context_ratio
 
     -- Try anchor reuse. The prefix anchor pins the start of the prompt prefix
-    -- to the same buffer-content boundary as a previous request; while the
-    -- user types forward it stays put and the prefix just grows at the cursor
-    -- edge, keeping the leading tokens byte-identical so the server's KV cache
-    -- stays warm.
+    -- to the same buffer-content boundary as a previous request; while the user
+    -- types forward it stays put and the prefix just grows at the cursor edge,
+    -- keeping the leading tokens byte-identical so the server's KV cache stays
+    -- warm.
     --
-    -- Two tiers:
-    --   * Full anchor (prefix AND suffix match) -- the steady-typing case. The
-    --     suffix after the cursor is unchanged, so every token before MID is at
-    --     the same position with the same content: ideal for SPM models too.
-    --   * Prefix-only snap (prefix matches, suffix changed) -- the jump / edit-
-    --     below-cursor case. The user moved forward (e.g. a paragraph down) or
-    --     edited text after the cursor, so the old suffix is stale and must NOT
-    --     be reused; but the prefix above the cursor is still byte-identical
-    --     and its KV is probably still warm from when we were last here. We
-    --     reuse that warm prefix start and send a fresh, budget-truncated
-    --     suffix. For prefix-first (PSM) prompts this still hits cache on the
-    --     whole prefix; for SPM it gains nothing but never hurts correctness,
-    --     since the window we send is always a valid prefix/suffix of the live
-    --     buffer.
+    -- The suffix is a HARD GATE. SPM models (Codestral) lead the prompt with the
+    -- suffix tokens, so a changed suffix cold-busts the ENTIRE server cache --
+    -- reusing a warm prefix start behind a stale suffix buys nothing on the
+    -- server and only keeps us pinned to an old position instead of warming the
+    -- new one. So we reuse only when the suffix still matches byte-for-byte, then
+    -- check back with the LCP prefix anchor; otherwise we fall through and re-pin
+    -- a fresh anchor here, which becomes the warm baseline for typing onward.
+    --
+    -- Two cases keep the suffix identical, so both still reuse:
+    --   * Steady typing -- inserting at the cursor leaves the after-cursor text
+    --     unchanged, and the prefix just grows at the cursor edge.
+    --   * A paste or edit *before* the cursor (e.g. dropping in a function) --
+    --     the after-cursor text is unchanged, so the LCP prefix anchor reuses
+    --     the warm prefix up to the edit and recomputes only the inserted tail
+    --     (within growth_slack).
+    -- A jump or an edit below the cursor changes the suffix -> re-pin.
+    --
     -- Forward reuse needs the prefix to be sliding (a fresh window would shed
     -- leading tokens). Backward reuse engages on a lower bar -- the cursor only
-    -- needs enough before-text to clear the anchor's floor -- since that case is
-    -- precisely when a fresh window would NOT slide yet still abandons a warm
-    -- anchor a few words ahead.
+    -- needs enough before-text to clear the anchor's floor.
     local anchor_floor = anchor and anchor.floor
     local can_anchor = prefix_would_slide or (type(anchor_floor) == 'number' and n_chars_before >= anchor_floor)
     if can_anchor and anchor and anchor.prev_lines_before then
-        local pre = extend_prefix_anchor(raw_before, anchor.prev_lines_before, growth_slack, anchor_floor)
-        if pre then
-            local suf = anchor.prev_lines_after and pin_suffix_anchor(raw_after, anchor.prev_lines_after)
-            if suf then
+        local suf = anchor.prev_lines_after and pin_suffix_anchor(raw_after, anchor.prev_lines_after)
+        if suf then
+            local pre = extend_prefix_anchor(raw_before, anchor.prev_lines_before, growth_slack, anchor_floor)
+            if pre then
                 return {
                     lines_before = pre,
                     lines_after = suf,
                     opts = {
-                        -- Same window the previous request opened, just grown
-                        -- at the cursor edge. No truncation this turn.
+                        -- Same window the previous request opened, just grown at
+                        -- the cursor edge (or with a small diverged tail from an
+                        -- edit before the cursor). No truncation this turn.
                         is_incomplete_before = false,
                         is_incomplete_after = false,
                         anchored = true,
                     },
                 }
             end
-
-            -- Prefix-only snap: keep the warm prefix start, but the suffix is
-            -- stale, so cut a fresh suffix from the live buffer sized to the
-            -- normal after-cursor budget.
-            local suffix_budget = math.floor(config.context_window * (1 - config.context_ratio))
-            local fresh_after = vim.fn.strcharpart(raw_after, 0, suffix_budget)
-            return {
-                lines_before = pre,
-                lines_after = fresh_after,
-                opts = {
-                    is_incomplete_before = false,
-                    is_incomplete_after = n_chars_after > suffix_budget,
-                    anchored = true,
-                    suffix_fresh = true,
-                },
-            }
         end
     end
 

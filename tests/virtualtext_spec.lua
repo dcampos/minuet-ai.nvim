@@ -111,10 +111,8 @@ return {
                     debounce = 0,
                     throttle = 0,
                     max_retries = 0,
-                    -- function form: budget depends on the prefix length
-                    context_after_chars = function(prefix_chars)
-                        return prefix_chars >= 10 and 5 or 100
-                    end,
+                    -- constant cap of 5 chars
+                    context_after_chars = 5,
                 },
                 provider_options = {
                     test = { model = 'fixture-model', optional = {} },
@@ -253,9 +251,7 @@ return {
                     throttle = 0,
                     max_retries = 0,
                     context_before_chars = 16000,
-                    context_after_chars = function(p)
-                        return math.min(4000, math.floor(60 * math.sqrt(p)))
-                    end,
+                    context_after_chars = 4000,
                     context_growth_slack = 12000,
                 },
                 provider_options = { test = { model = 'fixture-model', optional = {} } },
@@ -298,7 +294,7 @@ return {
         end,
     },
     {
-        name = 'virtualtext context_back_slack pins a larger prefix but reuses down to the floor',
+        name = 'virtualtext context_back_slack pins a larger prefix; a rewind re-pins (suffix gate)',
         run = function()
             helpers.setup_root_config {
                 provider = 'test',
@@ -345,23 +341,15 @@ return {
             helpers.expect_truthy(sent[1].opts.is_incomplete_before)
             helpers.expect_falsy(sent[1].opts.anchored)
 
-            -- Rewind inside the 80-char backward headroom. The second request
-            -- should send a shorter prefix with the same start, not a cold fresh
-            -- 240-char re-pin.
+            -- Rewind inside the backward headroom. With the suffix hard gate a
+            -- rewind changes the after-cursor text, so we re-pin a fresh window
+            -- rather than reuse the warm prefix behind a now-stale suffix.
             vim.api.nvim_win_set_cursor(0, { 60, 8 })
             virtualtext.action.fire()
 
             vim.fn.mode = original_mode
             helpers.expect_equal(#sent, 2)
-            helpers.expect_truthy(sent[2].opts.anchored, 'rewound request should reuse the warm snap')
-            helpers.expect_truthy(sent[2].opts.suffix_fresh, 'rewound request needs a fresh suffix')
-            helpers.expect_truthy(vim.fn.strchars(sent[2].lines_before) >= 160)
-            helpers.expect_truthy(vim.fn.strchars(sent[2].lines_before) < 240)
-            helpers.expect_equal(
-                sent[1].lines_before:sub(1, #sent[2].lines_before),
-                sent[2].lines_before,
-                'rewound request keeps the same prefix start'
-            )
+            helpers.expect_falsy(sent[2].opts.anchored, 'a rewind changes the suffix, so we re-pin')
 
             helpers.delete_buffer(bufnr)
         end,
