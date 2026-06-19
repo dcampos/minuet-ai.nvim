@@ -329,11 +329,12 @@ local M = {
         inline_max_groups = 2,
         inline_max_edit_ratio = 0.9,
         line_pair_min_similarity = 0.35,
-        -- Treesitter foreground coloring of proposed (added) block text. Off by
-        -- default. When on, multi-line proposed blocks render with (dimmed)
-        -- syntax colors over a subtle "added" background tint instead of the
-        -- flat add color. Small inline fragments stay flat (too little context
-        -- to parse reliably). See lua/minuet/duet/ts_highlight.lua.
+        -- Treesitter foreground coloring of proposed (added) text. Off by
+        -- default. When on, proposed blocks and inline edit fragments render
+        -- with (dimmed) syntax colors over a subtle "added" background tint
+        -- instead of the flat add color. Inline fragments are colored in the
+        -- context of their full proposed line, so a word changed inside a
+        -- string still reads as @string. See lua/minuet/duet/ts_highlight.lua.
         ts_highlight = false,
         ts_dim = true,
         ts_blend = 35,

@@ -99,14 +99,19 @@ local function collect_spans(ltree, source, spans)
     end
 end
 
+--- Emit chunks for the byte range [from, to) of `line`, coalescing runs that
+--- resolve to the same group. `owners` maps 0-based byte col -> capture span.
 ---@param line string
----@param owners table<integer, table> 0-based byte col -> winning span
+---@param owners table<integer, table>
 ---@param opts minuet.DuetTsHighlightOpts
+---@param from? integer 0-based inclusive (default 0)
+---@param to? integer 0-based exclusive (default #line)
 ---@return table[] chunks list of { text, hl_group }
-local function line_to_chunks(line, owners, opts)
+local function line_to_chunks(line, owners, opts, from, to)
+    from = from or 0
+    to = to or #line
     local chunks = {}
-    local n = #line
-    if n == 0 then
+    if to <= from then
         return chunks
     end
 
@@ -115,11 +120,11 @@ local function line_to_chunks(line, owners, opts)
         return resolve_group(owner and owner.hl or opts.base_hl, opts)
     end
 
-    local col = 0
-    while col < n do
+    local col = from
+    while col < to do
         local hl = hl_at(col)
         local run_end = col + 1
-        while run_end < n and hl_at(run_end) == hl do
+        while run_end < to and hl_at(run_end) == hl do
             run_end = run_end + 1
         end
         chunks[#chunks + 1] = { line:sub(col + 1, run_end), hl }
@@ -127,6 +132,47 @@ local function line_to_chunks(line, owners, opts)
     end
 
     return chunks
+end
+
+--- Parse `lines` as `lang` and return owners[row][col] = winning capture span
+--- (0-based row/col), resolving overlaps the way Neovim's highlighter does
+--- (higher priority wins; ties broken by capture order, later on top). Returns
+--- nil when no parser is available for `lang`.
+---@param lines string[]
+---@param lang string
+---@return table<integer, table<integer, table>>|nil
+local function compute_owners(lines, lang)
+    local source = table.concat(lines, '\n')
+    local ok, parser = pcall(vim.treesitter.get_string_parser, source, lang)
+    if not ok or not parser then
+        return nil
+    end
+    pcall(function()
+        parser:parse(true)
+    end)
+
+    local spans = {}
+    collect_spans(parser, source, spans)
+    table.sort(spans, function(a, b)
+        if a.priority ~= b.priority then
+            return a.priority < b.priority
+        end
+        return a.order < b.order
+    end)
+
+    local owners = {}
+    for _, span in ipairs(spans) do
+        for row = span.srow, span.erow do
+            owners[row] = owners[row] or {}
+            local line = lines[row + 1] or ''
+            local from = (row == span.srow) and span.scol or 0
+            local to = (row == span.erow) and span.ecol or #line
+            for col = from, to - 1 do
+                owners[row][col] = span
+            end
+        end
+    end
+    return owners
 end
 
 --- Syntax-color `lines` as if they were `lang` code.
@@ -139,46 +185,14 @@ function M.highlight_lines(lines, lang, opts)
     local base_hl = opts.base_hl or 'Normal'
     opts = vim.tbl_extend('keep', { base_hl = base_hl }, opts)
 
-    local source = table.concat(lines, '\n')
-    local ok, parser = pcall(vim.treesitter.get_string_parser, source, lang)
-    if not ok or not parser then
+    local owners = compute_owners(lines, lang)
+    if not owners then
         -- No parser for this language: degrade to flat base_hl.
         local out = {}
         for i, line in ipairs(lines) do
             out[i] = #line > 0 and { { line, base_hl } } or {}
         end
         return out
-    end
-
-    pcall(function()
-        parser:parse(true)
-    end)
-
-    local spans = {}
-    collect_spans(parser, source, spans)
-
-    -- Resolve overlaps the way Neovim's highlighter does: higher priority wins,
-    -- ties broken by capture order (later capture on top). Sorting ascending and
-    -- letting later writes overwrite yields exactly that.
-    table.sort(spans, function(a, b)
-        if a.priority ~= b.priority then
-            return a.priority < b.priority
-        end
-        return a.order < b.order
-    end)
-
-    -- owners[row][col] = winning span (row/col 0-based).
-    local owners = {}
-    for _, span in ipairs(spans) do
-        for row = span.srow, span.erow do
-            owners[row] = owners[row] or {}
-            local line = lines[row + 1] or ''
-            local from = (row == span.srow) and span.scol or 0
-            local to = (row == span.erow) and span.ecol or #line
-            for col = from, to - 1 do
-                owners[row][col] = span
-            end
-        end
     end
 
     local out = {}
@@ -195,6 +209,30 @@ end
 ---@return table[] chunks
 function M.highlight_line(line, lang, opts)
     return M.highlight_lines({ line }, lang, opts)[1]
+end
+
+--- Color the byte range [from_col, to_col) of `line`, using the WHOLE line as
+--- parse context so a fragment changed inside a string/comment inherits the
+--- right capture (e.g. @string) instead of being misparsed in isolation.
+--- Returns the chunk list for just that range. Used for inline edit fragments.
+---@param line string
+---@param lang string
+---@param from_col integer 0-based inclusive
+---@param to_col integer 0-based exclusive
+---@param opts? minuet.DuetTsHighlightOpts
+---@return table[] chunks
+function M.highlight_line_range(line, lang, from_col, to_col, opts)
+    opts = opts or {}
+    local base_hl = opts.base_hl or 'Normal'
+    opts = vim.tbl_extend('keep', { base_hl = base_hl }, opts)
+    from_col = math.max(0, from_col or 0)
+    to_col = math.min(#line, to_col or #line)
+
+    local owners = compute_owners({ line }, lang)
+    if not owners then
+        return { { line:sub(from_col + 1, to_col), base_hl } }
+    end
+    return line_to_chunks(line, owners[0] or {}, opts, from_col, to_col)
 end
 
 M._private = { resolve_group = resolve_group }

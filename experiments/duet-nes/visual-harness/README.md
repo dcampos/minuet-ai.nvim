@@ -171,10 +171,17 @@ unit-tested module plus an opt-in renderer integration:
   unknown languages degrade to flat `base_hl`. Tested in
   `tests/duet_ts_highlight_spec.lua`.
 - `preview.lua` integration, gated by config (default off):
-  `config.duet.preview.ts_highlight = true` colors multi-line *proposed blocks*
-  with dimmed syntax colors over `ts_add_bg` (`ts_dim`, `ts_blend`,
-  `ts_add_bg` tune it). Small inline fragments stay flat -- too little context to
-  parse reliably. Covered by a case in `tests/duet_preview_spec.lua`.
+  `config.duet.preview.ts_highlight = true` colors proposed *blocks* and inline
+  edit fragments with dimmed syntax colors over `ts_add_bg` (`ts_dim`,
+  `ts_blend`, `ts_add_bg` tune it). Inline fragments are colored via
+  `highlight_line_range` in the context of their full proposed line, so a word
+  changed inside a string still reads as `@string` (not the `@variable` it would
+  get in isolation). Covered by cases in `tests/duet_preview_spec.lua` and
+  `tests/duet_ts_highlight_spec.lua`.
+
+  Caveat surfaced by the harness: `@string` (green) over the green "added" tint
+  is low-contrast (green-on-green); tune `ts_add_bg` to a more neutral tint if
+  that bothers you.
 
 Reproduce the evidence:
 

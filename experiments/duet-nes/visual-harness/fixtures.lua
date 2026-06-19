@@ -40,6 +40,28 @@ return {
         select = true,
     },
 
+    number_inline = {
+        note = 'identifier -> number literal inline (distinct @number color)',
+        filetype = 'lua',
+        original = { 'local timeout = default' },
+        proposed = { 'local timeout = 3000' },
+    },
+
+    string_inline = {
+        note = 'word changed INSIDE a string (single-line -> inline chunk)',
+        filetype = 'lua',
+        original = { 'print("hello world")' },
+        proposed = { 'print("hello there")' },
+    },
+
+    string_block = {
+        note = 'block replacement containing a string literal (block path)',
+        filetype = 'lua',
+        original = { 'a', 'b' },
+        proposed = { 'local greeting = "hello there"', 'print(greeting)' },
+        select = true,
+    },
+
     block_rewrite = {
         note = 'multi-line block replacement (treesitter foreground color demo)',
         filetype = 'lua',

@@ -126,6 +126,43 @@ local function render_deleted_spans(bufnr, state, row, groups)
     end
 end
 
+--- Treesitter-colored virt_text for an inline edit fragment, or nil when ts
+--- coloring is off / unavailable. The fragment is colored in the context of the
+--- whole proposed line (so a word changed inside a string inherits @string),
+--- then only its changed span is returned.
+---@param bufnr integer
+---@param chunk minuet.DuetChunk
+---@param group minuet.DuetTextGroup
+---@return table[]|nil
+local function inline_ts_virt_text(bufnr, chunk, group)
+    local preview = require('minuet').config.duet.preview or {}
+    if not preview.ts_highlight then
+        return nil
+    end
+    if not (group.new_start_col and group.new_end_col and group.new_end_col > group.new_start_col) then
+        return nil
+    end
+    local new_line = chunk.new_line or (chunk.new_lines or {})[1]
+    if not new_line then
+        return nil
+    end
+    local ft = vim.bo[bufnr].filetype
+    if not ft or ft == '' then
+        return nil
+    end
+    local lang = vim.treesitter.language.get_lang(ft) or ft
+    local ok, parser = pcall(vim.treesitter.get_string_parser, new_line, lang)
+    if not ok or not parser then
+        return nil
+    end
+    return ts_highlight.highlight_line_range(new_line, lang, group.new_start_col, group.new_end_col, {
+        dim = preview.ts_dim ~= false,
+        blend = preview.ts_blend or 35,
+        bg = preview.ts_add_bg or nil,
+        base_hl = 'Normal',
+    })
+end
+
 local function render_inline_chunk(bufnr, state, chunk, cursor_char, active)
     local row = chunk.anchor_row
     local groups = chunk.groups or diff.text_groups(chunk.old_line or '', chunk.new_line or '')
@@ -144,8 +181,14 @@ local function render_inline_chunk(bufnr, state, chunk, cursor_char, active)
 
     if group.new_text ~= '' then
         local col = group.old_end_col or group.insert_col
+        local virt_text
+        if active then
+            virt_text = { { group.new_text, 'MinuetDuetActive' } }
+        else
+            virt_text = inline_ts_virt_text(bufnr, chunk, group) or { { group.new_text, 'MinuetDuetAddText' } }
+        end
         add_extmark(bufnr, state, row, {
-            virt_text = { { group.new_text, active and 'MinuetDuetActive' or 'MinuetDuetAddText' } },
+            virt_text = virt_text,
             virt_text_pos = 'inline',
             priority = active and ACTIVE_HL_PRIORITY or TEXT_HL_PRIORITY,
         }, col)

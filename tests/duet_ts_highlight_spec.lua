@@ -111,4 +111,45 @@ return {
             helpers.expect_equal(out, { { { 'whatever text', 'MinuetDuetAdd' } } })
         end,
     },
+    {
+        name = 'highlight_line_range colors a fragment inside a string as @string',
+        run = function()
+            helpers.ensure_runtime()
+            local ts = helpers.reload 'minuet.duet.ts_highlight'
+
+            -- `there` sits inside a string; with full-line context it must be a
+            -- string capture, not the @variable it would get in isolation.
+            local line = 'print("hello there")'
+            local from = line:find('there', 1, true) - 1
+            local chunks = ts.highlight_line_range(line, 'lua', from, from + #'there')
+
+            local txt = {}
+            for _, c in ipairs(chunks) do
+                txt[#txt + 1] = c[1]
+            end
+            helpers.expect_equal(table.concat(txt), 'there')
+            for _, c in ipairs(chunks) do
+                helpers.expect_truthy(
+                    c[2] and c[2]:find('string', 1, true),
+                    'fragment in a string should be @string*, got ' .. tostring(c[2])
+                )
+            end
+        end,
+    },
+    {
+        name = 'highlight_line_range fragment in code is not a string',
+        run = function()
+            helpers.ensure_runtime()
+            local ts = helpers.reload 'minuet.duet.ts_highlight'
+
+            local line = 'local total = subtotal + tax'
+            local from = line:find('subtotal', 1, true) - 1
+            local chunks = ts.highlight_line_range(line, 'lua', from, from + #'subtotal')
+            local hl = chunks[1][2]
+            helpers.expect_truthy(
+                hl and not hl:find('string', 1, true),
+                'identifier in code should not be @string, got ' .. tostring(hl)
+            )
+        end,
+    },
 }
