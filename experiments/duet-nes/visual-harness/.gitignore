@@ -1,0 +1,3 @@
+# Generated screenshots and isolated nvim state (vim.pack plugins, caches).
+/out/
+/.state/
