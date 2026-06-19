@@ -335,17 +335,21 @@ local M = {
         --               sub-linear curve (e.g. sqrt) so the suffix grows fast
         --               at first then levels off at a small cap.
         context_after_chars = nil,
-        -- Context anchor reuse: how many chars of new typing the request
-        -- prefix is allowed to grow past the anchored prefix start before we
-        -- re-anchor ("snap"). The anchor pins the start of the prompt prefix:
-        -- while you type forward it stays put and the prompt just grows at the
-        -- cursor edge, so the leading tokens are byte-identical request to
-        -- request and the server's KV cache stays warm. The bigger this slack,
-        -- the longer the anchor stays pinned during steady typing -- which is
-        -- exactly what we want, since there is no reason to move the anchor
-        -- while the user is just typing. It only snaps when you type past the
-        -- slack, jump, or edit above the anchor. 0 disables the feature
-        -- (legacy behavior: window slides on every keystroke).
+        -- Context anchor reuse: how many chars the request prefix is allowed to
+        -- send past the warm shared prefix before we re-anchor ("snap"). The
+        -- anchor pins the start of the prompt prefix: while you type forward it
+        -- stays put and the prompt just grows at the cursor edge, so the leading
+        -- tokens are byte-identical request to request and the server's KV cache
+        -- stays warm. The "chars past the warm prefix" are whatever the server
+        -- must recompute -- freshly typed text, and a diverged region when you
+        -- edit a few chars near the cursor (the prefix is re-pinned at the same
+        -- warm start and only the changed tail is recomputed). The bigger this
+        -- slack, the longer the anchor stays pinned during steady typing and
+        -- small local edits -- exactly what we want. It only snaps when that
+        -- recomputed tail exceeds the slack, you jump, or you edit high up in
+        -- the prefix (which leaves little warm prefix and moves the divergence
+        -- far from the cursor). 0 disables the feature (legacy behavior: window
+        -- slides on every keystroke).
         --
         -- This helps any FIM model and is especially valuable for SPM-ordered
         -- prompts (suffix before prefix), where appending at the cursor edge

@@ -405,6 +405,81 @@ return {
     },
 
     {
+        name = 'utils.get_context re-pins a warm anchor when only the tail diverged',
+        run = function()
+            -- A char changed just before the cursor (the common edit) must not
+            -- throw away the warm prefix: the server reuses KV up to the change
+            -- and only recomputes the short tail, so we still re-pin at the same
+            -- anchor start and send the live (edited) content from there.
+            helpers.setup_root_config {
+                context_window = 120,
+                context_ratio = 100 / 120,
+            }
+            local utils = helpers.reload 'minuet.utils'
+            local bufnr = helpers.create_buffer({ indexed_chars(700), indexed_chars(200) }, { 1, 450 })
+
+            local baseline = utils.get_context(utils.make_cmp_context())
+            helpers.expect_equal(vim.fn.strchars(baseline.lines_before), 100)
+
+            -- Replace one char a few columns before the cursor (0-based col 447):
+            -- late divergence, same length so columns do not shift.
+            vim.api.nvim_buf_set_text(bufnr, 0, 447, 0, 448, { 'X' })
+
+            local context = utils.get_context(utils.make_cmp_context(), nil, {
+                prev_lines_before = baseline.lines_before,
+                prev_lines_after = baseline.lines_after,
+                growth_slack = 200,
+            })
+
+            helpers.expect_truthy(context.opts.anchored, 'late divergence stays warm')
+            helpers.expect_equal(vim.fn.strchars(context.lines_before), 100, 'same span anchor->cursor')
+            -- Shares the warm head up to the edit, but carries the live edit --
+            -- proof we send current content, not the stale cached prefix.
+            helpers.expect_equal(
+                context.lines_before:sub(1, 90),
+                baseline.lines_before:sub(1, 90),
+                'leading bytes up to the edit stay byte-identical (warm)'
+            )
+            helpers.expect_truthy(context.lines_before:find('X', 1, true) ~= nil, 'live edit is present')
+
+            helpers.delete_buffer(bufnr)
+        end,
+    },
+
+    {
+        name = 'utils.get_context re-pins fresh when the divergence is too far from the cursor',
+        run = function()
+            -- The edit lands well inside the anchored prefix, leaving only a
+            -- short warm shared prefix and a long un-cached tail past the slack:
+            -- re-pinning the whole prefix would be mostly cold, so fall back to a
+            -- fresh budget window instead.
+            helpers.setup_root_config {
+                context_window = 120,
+                context_ratio = 100 / 120,
+            }
+            local utils = helpers.reload 'minuet.utils'
+            local bufnr = helpers.create_buffer({ indexed_chars(700), indexed_chars(200) }, { 1, 450 })
+
+            local baseline = utils.get_context(utils.make_cmp_context())
+
+            -- Anchor starts at col 351; edit at 0-based col 419 keeps the 64-char
+            -- locator head intact but leaves ~31 un-cached chars, over the slack.
+            vim.api.nvim_buf_set_text(bufnr, 0, 419, 0, 420, { 'X' })
+
+            local context = utils.get_context(utils.make_cmp_context(), nil, {
+                prev_lines_before = baseline.lines_before,
+                prev_lines_after = baseline.lines_after,
+                growth_slack = 16,
+            })
+
+            helpers.expect_falsy(context.opts.anchored, 'early divergence is not worth re-pinning')
+            helpers.expect_equal(vim.fn.strchars(context.lines_before), 100)
+
+            helpers.delete_buffer(bufnr)
+        end,
+    },
+
+    {
         name = 'utils.get_context does not reuse a rewound anchor below the floor',
         run = function()
             helpers.setup_root_config {

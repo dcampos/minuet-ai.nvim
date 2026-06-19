@@ -278,18 +278,47 @@ local function collect_nearby_lines(bufnr, start_line, step, max_chars)
     return table.concat(chunks, '\n')
 end
 
--- Find the LATEST occurrence of prev_pre inside raw_before such that the
--- text after the match (typed-since-anchor) is at most growth_slack chars.
--- Returns raw_before:sub(match_start) on success, or nil.
---
--- This is what lets the new request reuse the same anchor as the previous
--- one: the returned lines_before begins at the same buffer-content boundary
--- as prev_pre, then extends by typed_since chars. The whole point is to keep
--- the leading bytes of the FIM prompt byte-identical across requests so the
--- server's KV cache stays warm.
+-- Byte length of the longest common prefix of a:sub(ai) and b, snapped down to
+-- a UTF-8 character boundary so the caller can slice both sides cleanly. This
+-- is where the live buffer and a cached prefix diverge -- i.e. how far the
+-- server's KV stays warm before it must recompute.
+---@param a string
+---@param ai integer 1-based start index into a
+---@param b string
+---@return integer
+local function common_prefix_len(a, ai, b)
+    local limit = math.min(#a - ai + 1, #b)
+    local i = 0
+    while i < limit and a:byte(ai + i) == b:byte(i + 1) do
+        i = i + 1
+    end
+    -- If the divergence falls inside a multibyte char, retreat to its start
+    -- (UTF-8 continuation bytes are 0x80..0xBF).
+    while i > 0 do
+        local c = b:byte(i + 1)
+        if c and c >= 0x80 and c < 0xC0 then
+            i = i - 1
+        else
+            break
+        end
+    end
+    return i
+end
+
+-- Reuse a previous request's prefix start so the server's KV cache stays warm.
+-- Locate where prev_pre begins in raw_before by its stable HEAD (edits cluster
+-- near the cursor -- prev_pre's tail -- so the head still finds the start even
+-- when the tail diverged), then measure the longest common prefix from there.
+-- The server reuses cached KV up to that shared prefix and only recomputes what
+-- follows, so we re-pin whenever the chars we would send past it -- the
+-- un-cached tail, the diverged region plus anything freshly typed -- stay
+-- within growth_slack. The returned lines_before begins at the same
+-- buffer-content boundary as prev_pre. An exact, unchanged prefix is just the
+-- special case where the shared prefix is all of prev_pre and the tail is pure
+-- new typing.
 ---@param raw_before string  buffer text up to cursor (fetched with extra slack)
 ---@param prev_pre string  lines_before from the previous request
----@param growth_slack integer max chars of new text past the anchor
+---@param growth_slack integer max chars sent past the warm shared prefix
 ---@param floor? integer when the cursor has moved BACK into the anchored prefix
 ---  (prev_pre longer than raw_before), reuse the anchor by sending its leading
 ---  [start..cursor] slice as long as that slice is still at least `floor` chars.
@@ -304,31 +333,37 @@ local function extend_prefix_anchor(raw_before, prev_pre, growth_slack, floor)
     local prev_blen = #prev_pre
     local raw_blen = #raw_before
 
-    -- Forward: the anchored prefix still sits within raw_before (cursor at or
-    -- past the anchored end). Find its latest occurrence whose typed-since tail
-    -- is within slack, and grow from there. Only possible when prev_pre fits.
+    -- Forward / late-divergence: the anchor start still sits within raw_before
+    -- (cursor at or past the anchored end). Locate it by prev_pre's head, then
+    -- accept the warmest occurrence whose un-cached tail is within slack. Only
+    -- possible when prev_pre fits; a longer prev_pre means the cursor rewound
+    -- (the backward branch below).
     if prev_blen <= raw_blen then
-        -- Earliest byte position the match could start while still keeping
-        -- typed_since within slack (worst case 4 bytes/char for UTF-8).
+        local probe = prev_pre:sub(1, math.min(64, prev_blen))
+        -- Earliest byte position the start could sit while still keeping the
+        -- un-cached tail within slack (worst case 4 bytes/char for UTF-8).
         local earliest = raw_blen - prev_blen + 1 - growth_slack * 4
         if earliest < 1 then
             earliest = 1
         end
-        local best
+        local best_start, best_lcp
         local pos = earliest
         while true do
-            local found = raw_before:find(prev_pre, pos, true)
+            local found = raw_before:find(probe, pos, true)
             if not found then
                 break
             end
-            local tail = raw_before:sub(found + prev_blen)
-            if vim.fn.strchars(tail) <= growth_slack then
-                best = found
+            local lcp = common_prefix_len(raw_before, found, prev_pre)
+            local uncached = vim.fn.strchars(raw_before:sub(found + lcp))
+            -- Prefer the warmest re-pin (longest shared prefix); on a tie the
+            -- occurrence nearest the cursor wins (smallest un-cached tail).
+            if uncached <= growth_slack and (not best_lcp or lcp >= best_lcp) then
+                best_start, best_lcp = found, lcp
             end
             pos = found + 1
         end
-        if best then
-            return raw_before:sub(best)
+        if best_start then
+            return raw_before:sub(best_start)
         end
     end
 
