@@ -709,21 +709,23 @@ local function trigger(bufnr, overrides, is_retry, is_manual)
     -- recent "snap points": the prefix/suffix captured each time we re-anchored.
     -- While the user types forward the newest snap point keeps matching, so the
     -- prefix just grows from it (the snap stays put -- slack measures chars
-    -- typed since the snap). On a jump the newest no longer matches, so we look
-    -- back through older snap points and snap to the first one still
-    -- buffer-valid -- its prefix is probably still warm from when we were last
-    -- there. The ring is only searched past its newest entry when that newest
-    -- one fails to anchor, i.e. on a snap, not on every keystroke.
-    local growth_slack = (cfg.virtualtext or {}).context_growth_slack or 0
+    -- typed since the snap). When the newest snap no longer anchors, we look
+    -- back through older snap points and snap to the first prefix+suffix pair
+    -- that is still buffer-valid. The ring is only searched past its newest
+    -- entry when that newest one fails to anchor, i.e. on a snap, not on every
+    -- keystroke.
+    local vt_cfg = cfg.virtualtext or {}
+    local growth_slack = vt_cfg.context_growth_slack or 0
+    local divergence_slack = vt_cfg.context_divergence_slack or growth_slack
     -- Backward reuse floor: a rewound cursor can keep reusing a truncated
     -- anchor while the prefix it would send stays at least this many chars.
     -- Equals the prefix floor (context_before_chars); the pinned request is
     -- back_slack chars larger, and that difference is the backward headroom.
-    local anchor_floor = (cfg.virtualtext or {}).context_before_chars
+    local anchor_floor = vt_cfg.context_before_chars
     local cmp_context = utils.make_cmp_context()
 
     local context
-    if growth_slack > 0 and ctx.anchors then
+    if math.max(growth_slack, divergence_slack) > 0 and ctx.anchors then
         for i = #ctx.anchors, 1, -1 do
             local snap = ctx.anchors[i]
             if vim.deep_equal(snap.params, params) then
@@ -731,6 +733,7 @@ local function trigger(bufnr, overrides, is_retry, is_manual)
                     prev_lines_before = snap.lines_before,
                     prev_lines_after = snap.lines_after,
                     growth_slack = growth_slack,
+                    divergence_slack = divergence_slack,
                     floor = snap.is_incomplete_before and type(anchor_floor) == 'number' and anchor_floor or nil,
                 })
                 if cand.opts.anchored then
@@ -743,12 +746,10 @@ local function trigger(bufnr, overrides, is_retry, is_manual)
     if not context then
         context = vt_get_context(cmp_context, cfg)
     end
-    -- Bound the suffix independently of the prefix. The prefix is kept warm on
-    -- the server's KV cache by the anchor, but the suffix is rarely cached, so
-    -- a smaller suffix directly cuts the un-cached token cost per request.
-    -- A constant cap only: the suffix must stay byte-stable across requests or a
-    -- changed suffix cold-busts the server cache (SPM). A prefix-dependent budget
-    -- would resize the suffix as the prefix grows and self-bust every keystroke.
+    -- Bound the suffix independently of the prefix. A constant cap only: the
+    -- suffix must stay byte-stable across requests or a changed suffix
+    -- cold-busts the server cache (SPM). A prefix-dependent budget would resize
+    -- the suffix as the prefix grows and self-bust every keystroke.
     local after_opt = (cfg.virtualtext or {}).context_after_chars
     if type(after_opt) == 'number' and after_opt >= 0 then
         local full_after = context.lines_after

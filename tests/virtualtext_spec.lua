@@ -159,7 +159,7 @@ return {
         end,
     },
     {
-        name = 'virtualtext anchor snaps back to an older snap point after a jump',
+        name = 'virtualtext anchor checks older snap points when the newest one fails',
         run = function()
             helpers.setup_root_config {
                 provider = 'test',
@@ -171,6 +171,7 @@ return {
                     throttle = 0,
                     max_retries = 0,
                     context_growth_slack = 100,
+                    context_divergence_slack = 37,
                     max_anchors = 8,
                 },
                 provider_options = {
@@ -182,12 +183,14 @@ return {
             -- control.fresh = the prefix a fresh (no-anchor) window returns.
             -- control.a_anchors = whether a candidate whose snap prefix is 'A'
             -- is currently still buffer-valid (anchors). This lets us simulate
-            -- a jump where the newest snap ('B') is stale but an older one ('A')
-            -- is still warm.
+            -- a snap where the newest point ('B') is stale but an older one
+            -- ('A') is still warm.
             local control = { fresh = 'A', a_anchors = false }
+            local anchor_divergence_slacks = {}
             package.loaded['minuet.utils'] = setmetatable({
                 get_context = function(_, _, anchor)
                     if anchor then
+                        table.insert(anchor_divergence_slacks, anchor.divergence_slack)
                         local ok = anchor.prev_lines_before == 'A' and control.a_anchors
                         return {
                             lines_before = anchor.prev_lines_before .. '+',
@@ -221,17 +224,18 @@ return {
             -- T2: snap A rejected (slack exceeded), fresh window 'B' -> snap B.
             control.fresh = 'B'
             virtualtext.action.fire()
-            -- T3: a jump back -- newest snap B is stale, older snap A is warm.
+            -- T3: newest snap B is stale, older snap A is warm.
             control.a_anchors = true
             virtualtext.action.fire()
 
             helpers.expect_equal(#sent, 3, 'three requests dispatched')
             helpers.expect_equal(sent[1].lines_before, 'A', 'T1 sends the fresh A window')
             helpers.expect_equal(sent[2].lines_before, 'B', 'T2 re-anchors to a fresh B window')
-            -- The newest snap (B) does not match on the jump; the ring looks
-            -- back and snaps to the older A, growing from it ('A+').
+            -- The newest snap (B) does not match; the ring looks back and snaps
+            -- to the older A, growing from it ('A+').
             helpers.expect_equal(sent[3].lines_before, 'A+', 'T3 snaps back to the older warm anchor')
             helpers.expect_truthy(sent[3].opts.anchored, 'snap-back is an anchored reuse')
+            helpers.expect_equal(anchor_divergence_slacks[1], 37, 'divergence slack is passed to anchor lookup')
 
             package.loaded['minuet.utils'] = real_utils
             vim.fn.mode = original_mode

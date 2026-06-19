@@ -311,14 +311,19 @@ end
 -- when the tail diverged), then measure the longest common prefix from there.
 -- The server reuses cached KV up to that shared prefix and only recomputes what
 -- follows, so we re-pin whenever the chars we would send past it -- the
--- un-cached tail, the diverged region plus anything freshly typed -- stay
--- within growth_slack. The returned lines_before begins at the same
--- buffer-content boundary as prev_pre. An exact, unchanged prefix is just the
--- special case where the shared prefix is all of prev_pre and the tail is pure
--- new typing.
+-- un-cached tail -- exceed budget. The budget depends on what changed: a pure
+-- append at the prefix tail (typing, or a paste at the cursor -- the shared
+-- prefix is ALL of prev_pre) gets the larger growth_slack, while a divergence
+-- (an edit/paste that changed bytes already inside prev_pre, so the shared
+-- prefix is shorter) gets the tighter divergence_slack, since recomputing
+-- changed bytes is cold. The returned lines_before begins at the same
+-- buffer-content boundary as prev_pre.
 ---@param raw_before string  buffer text up to cursor (fetched with extra slack)
 ---@param prev_pre string  lines_before from the previous request
----@param growth_slack integer max chars sent past the warm shared prefix
+---@param growth_slack integer max appended chars past the warm prefix (typing /
+---  paste at the cursor) before re-pinning
+---@param divergence_slack? integer max cold chars past the warm prefix when
+---  content CHANGED inside it (defaults to growth_slack)
 ---@param floor? integer when the cursor has moved BACK into the anchored prefix
 ---  (prev_pre longer than raw_before), reuse the anchor by sending its leading
 ---  [start..cursor] slice as long as that slice is still at least `floor` chars.
@@ -326,10 +331,12 @@ end
 ---  keep hitting the same warm prefix start instead of cold re-pinning. nil/0
 ---  disables backward reuse (forward-only, the historical behavior).
 ---@return string?
-local function extend_prefix_anchor(raw_before, prev_pre, growth_slack, floor)
+local function extend_prefix_anchor(raw_before, prev_pre, growth_slack, divergence_slack, floor)
     if type(prev_pre) ~= 'string' or prev_pre == '' then
         return nil
     end
+    growth_slack = growth_slack or 0
+    divergence_slack = divergence_slack or growth_slack
     local prev_blen = #prev_pre
     local raw_blen = #raw_before
 
@@ -342,7 +349,8 @@ local function extend_prefix_anchor(raw_before, prev_pre, growth_slack, floor)
         local probe = prev_pre:sub(1, math.min(64, prev_blen))
         -- Earliest byte position the start could sit while still keeping the
         -- un-cached tail within slack (worst case 4 bytes/char for UTF-8).
-        local earliest = raw_blen - prev_blen + 1 - growth_slack * 4
+        local search_slack = math.max(growth_slack, divergence_slack)
+        local earliest = raw_blen - prev_blen + 1 - search_slack * 4
         if earliest < 1 then
             earliest = 1
         end
@@ -355,9 +363,10 @@ local function extend_prefix_anchor(raw_before, prev_pre, growth_slack, floor)
             end
             local lcp = common_prefix_len(raw_before, found, prev_pre)
             local uncached = vim.fn.strchars(raw_before:sub(found + lcp))
+            local budget = lcp >= prev_blen and growth_slack or divergence_slack
             -- Prefer the warmest re-pin (longest shared prefix); on a tie the
             -- occurrence nearest the cursor wins (smallest un-cached tail).
-            if uncached <= growth_slack and (not best_lcp or lcp >= best_lcp) then
+            if uncached <= budget and (not best_lcp or lcp >= best_lcp) then
                 best_start, best_lcp = found, lcp
             end
             pos = found + 1
@@ -428,6 +437,8 @@ end
 ---@field prev_lines_after string lines_after sent in the previous request
 ---@field growth_slack? integer Max new chars typed since the anchor before
 ---we re-anchor. Defaults to 0 (only reuse when cursor hasn't moved).
+---@field divergence_slack? integer Max cold chars after a prefix divergence.
+---Defaults to growth_slack.
 
 --- Get the context around the cursor position for code completion.
 ---
@@ -439,9 +450,9 @@ end
 --- slides on every keystroke and every request is a fresh cache miss. With
 --- one, we reuse the window only while the suffix still matches byte-for-byte
 --- (a hard gate — SPM models lead the prompt with the suffix, so a changed
---- suffix cold-busts the whole cache) and extend `prev_lines_before` by the
---- typed-since chars within growth_slack. When the suffix changes or the prefix
---- drifts past the slack we re-anchor with a fresh window (single chunked
+--- suffix cold-busts the whole cache). Pure appends use growth_slack; edits
+--- inside the anchored prefix use divergence_slack. When the suffix changes or
+--- either slack is exceeded we re-anchor with a fresh window (single chunked
 --- invalidation rather than per-char).
 ---@param cmp_context table Cursor + cursor_before_line/cursor_after_line.
 ---@param cfg? table Effective config; overrides context_window/context_ratio.
@@ -458,7 +469,8 @@ function M.get_context(cmp_context, cfg, anchor)
     -- the standard window. With no anchor, growth_slack == 0 reproduces the
     -- legacy fetch size exactly.
     local growth_slack = (anchor and anchor.growth_slack) or 0
-    local fetch_chars = max_side_chars + growth_slack
+    local divergence_slack = (anchor and anchor.divergence_slack) or growth_slack
+    local fetch_chars = max_side_chars + math.max(growth_slack, divergence_slack)
 
     local before_prefix = collect_nearby_lines(bufnr, cursor.line, -1, fetch_chars)
     local after_suffix = collect_nearby_lines(bufnr, cursor.line + 1, 1, fetch_chars)
@@ -501,7 +513,7 @@ function M.get_context(cmp_context, cfg, anchor)
     --   * A paste or edit *before* the cursor (e.g. dropping in a function) --
     --     the after-cursor text is unchanged, so the LCP prefix anchor reuses
     --     the warm prefix up to the edit and recomputes only the inserted tail
-    --     (within growth_slack).
+    --     (within divergence_slack).
     -- A jump or an edit below the cursor changes the suffix -> re-pin.
     --
     -- Forward reuse needs the prefix to be sliding (a fresh window would shed
@@ -512,7 +524,8 @@ function M.get_context(cmp_context, cfg, anchor)
     if can_anchor and anchor and anchor.prev_lines_before then
         local suf = anchor.prev_lines_after and pin_suffix_anchor(raw_after, anchor.prev_lines_after)
         if suf then
-            local pre = extend_prefix_anchor(raw_before, anchor.prev_lines_before, growth_slack, anchor_floor)
+            local pre =
+                extend_prefix_anchor(raw_before, anchor.prev_lines_before, growth_slack, divergence_slack, anchor_floor)
             if pre then
                 return {
                     lines_before = pre,

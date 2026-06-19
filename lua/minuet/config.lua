@@ -259,9 +259,9 @@ local M = {
         -- suggestion without a round-trip) and gives the anchor more recent
         -- prefixes to snap back to. Cheap to keep large -- entries are small.
         pool_size = 128,
-        -- Number of recent anchor "snap points" kept per buffer. On a jump the
-        -- anchor looks back through these (newest first) for a still-valid
-        -- prefix to snap back to, instead of paying for a cold re-anchor.
+        -- Number of recent anchor "snap points" kept per buffer. When the newest
+        -- snap no longer anchors, the ring is searched newest-first for a
+        -- still-valid prefix+suffix pair instead of paying for a cold re-anchor.
         max_anchors = 8,
         -- Maximum automatic retry triggers fired per session when the pool
         -- yields fewer than n_completions effective suggestions. Each retry
@@ -307,20 +307,19 @@ local M = {
         -- (e.g. 16000*0.75 = 12000). Set this to size the prefix directly instead:
         -- the prefix gets exactly this many chars and the suffix is sized on its
         -- own by `context_after_chars` (below). So `context_before_chars = 16000`
-        -- with the sqrt suffix curve gives a 16k prefix + a ~4k suffix in a long
-        -- doc, rather than 12k/4k. While anchored the prefix still grows up to
-        -- `context_growth_slack` chars past this. nil keeps the legacy combined
-        -- budget. virtualtext (FIM) only; cmp / lsp / blink are unaffected.
+        -- with `context_after_chars = 4000` gives a 16k prefix + 4k suffix in a
+        -- long doc, rather than 12k/4k. While anchored the prefix still grows up
+        -- to `context_growth_slack` chars past this. nil keeps the legacy
+        -- combined budget. virtualtext (FIM) only; cmp / lsp / blink are
+        -- unaffected.
         context_before_chars = nil,
-        -- Backward headroom for the edit -> jump-back -> edit pattern. We pin
-        -- (fetch and send) this many chars of prefix BEYOND context_before_chars,
-        -- so the cursor can rewind up to this far and still reuse the same warm
-        -- anchor -- the slice we send keeps its start byte and stays >=
-        -- context_before_chars chars, a partial server-cache hit instead of a
-        -- cold re-pin. The request prefix is therefore context_before_chars +
-        -- context_back_slack (e.g. 16000 + 8000 = 24000). The extra prefix is
-        -- almost always cached, so it is cheap. Requires context_before_chars; 0
-        -- disables backward reuse (only forward typing keeps the anchor warm).
+        -- Backward headroom for suffix-stable rewinds, mainly backspace/delete
+        -- before the cursor. We pin (fetch and send) this many chars of prefix
+        -- BEYOND context_before_chars, so the cursor can rewind up to this far
+        -- and still reuse the same warm anchor if the suffix gate still matches.
+        -- A jump that changes the suffix still re-pins. The request prefix is
+        -- therefore context_before_chars + context_back_slack (e.g. 16000 + 8000
+        -- = 24000). Requires context_before_chars; 0 disables backward reuse.
         context_back_slack = 0,
         -- Suffix (after-cursor) char cap for FIM requests, bounded independently
         -- of the prefix. A constant only -- the suffix must stay byte-stable as
@@ -332,20 +331,14 @@ local M = {
         --   number -> hard cap of that many chars
         context_after_chars = nil,
         -- Context anchor reuse: how many chars the request prefix is allowed to
-        -- send past the warm shared prefix before we re-anchor ("snap"). The
-        -- anchor pins the start of the prompt prefix: while you type forward it
-        -- stays put and the prompt just grows at the cursor edge, so the leading
-        -- tokens are byte-identical request to request and the server's KV cache
-        -- stays warm. The "chars past the warm prefix" are whatever the server
-        -- must recompute -- freshly typed text, and a diverged region when you
-        -- edit a few chars near the cursor (the prefix is re-pinned at the same
-        -- warm start and only the changed tail is recomputed). The bigger this
-        -- slack, the longer the anchor stays pinned during steady typing and
-        -- small local edits -- exactly what we want. It only snaps when that
-        -- recomputed tail exceeds the slack, you jump, or you edit high up in
-        -- the prefix (which leaves little warm prefix and moves the divergence
-        -- far from the cursor). 0 disables the feature (legacy behavior: window
-        -- slides on every keystroke).
+        -- grow past the previous fully-warm prefix before we re-anchor ("snap").
+        -- The anchor pins the start of the prompt prefix: while you type forward
+        -- it stays put and the prompt just grows at the cursor edge, so the
+        -- leading tokens are byte-identical request to request and the server's
+        -- KV cache stays warm. This is the append budget: freshly typed text or
+        -- a paste at the cursor can grow this far before the next snap. 0
+        -- disables the feature (legacy behavior: window slides on every
+        -- keystroke).
         --
         -- This helps any FIM model and is especially valuable for SPM-ordered
         -- prompts (suffix before prefix), where appending at the cursor edge
@@ -360,12 +353,17 @@ local M = {
         --
         -- Sizing: treat this as part of your context budget. While anchored,
         -- the prompt can exceed `context_window` by up to this many chars, and
-        -- each request fetches `context_window + context_growth_slack` chars
-        -- per side. So the effective max prompt is `context_window +
-        -- context_growth_slack`. With a small window for a local model (e.g.
-        -- 512) scale this down so it doesn't dominate the prompt; re-anchoring
-        -- is a single chunked cache miss rather than a per-char one.
+        -- each request fetches enough text for the larger of context_growth_slack
+        -- and context_divergence_slack. With a small window for a local model
+        -- (e.g. 512) scale this down so it doesn't dominate the prompt;
+        -- re-anchoring is a single chunked cache miss rather than a per-char one.
         context_growth_slack = 2048,
+        -- Cold-tail cap for edits/pastes that change bytes already inside the
+        -- anchored prefix. Unlike a pure append, a divergence forces the server
+        -- to recompute from the edit point to the cursor, so you may want this
+        -- smaller than context_growth_slack. nil keeps the old behavior and uses
+        -- context_growth_slack for both append and divergence.
+        context_divergence_slack = nil,
     },
     provider = 'codestral',
     -- the maximum total characters of the context before and after the cursor
@@ -516,9 +514,9 @@ M.provider_options = {
             max_tokens = nil,
             -- Routing hint that pins consecutive FIM requests to the same warm
             -- prompt-cache replica (Mistral/OpenAI field, merged verbatim into
-            -- the request body). Paired with a stable prefix (see
-            -- virtualtext.context_growth_slack) it turns Codestral's
-            -- per-keystroke recompute into near-full prefix cache reuse;
+            -- the request body). Paired with a stable suffix and anchored prefix
+            -- (see virtualtext.context_growth_slack) it turns Codestral's
+            -- per-keystroke recompute into near-full prompt cache reuse;
             -- without it ~43% of requests get load-balanced onto a cold
             -- replica and recompute the whole prompt. A single shared value is
             -- fine: caching is isolated per API key, and a shared key showed no

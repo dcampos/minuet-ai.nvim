@@ -462,6 +462,51 @@ return {
     },
 
     {
+        name = 'utils.get_context splits append slack from divergence slack',
+        run = function()
+            helpers.setup_root_config {
+                context_window = 120,
+                context_ratio = 100 / 120,
+            }
+            local utils = helpers.reload 'minuet.utils'
+
+            local append_bufnr = helpers.create_buffer({ indexed_chars(700), indexed_chars(200) }, { 1, 450 })
+            local append_baseline = utils.get_context(utils.make_cmp_context())
+            vim.api.nvim_buf_set_text(append_bufnr, 0, 450, 0, 450, { string.rep('P', 40) })
+            vim.api.nvim_win_set_cursor(0, { 1, 490 })
+
+            local append_context = utils.get_context(utils.make_cmp_context(), nil, {
+                prev_lines_before = append_baseline.lines_before,
+                prev_lines_after = append_baseline.lines_after,
+                growth_slack = 80,
+                divergence_slack = 16,
+            })
+
+            helpers.expect_truthy(append_context.opts.anchored, 'append uses the larger growth slack')
+            helpers.expect_equal(vim.fn.strchars(append_context.lines_before), 140)
+            helpers.delete_buffer(append_bufnr)
+
+            local divergence_bufnr = helpers.create_buffer({ indexed_chars(700), indexed_chars(200) }, { 1, 450 })
+            local divergence_baseline = utils.get_context(utils.make_cmp_context())
+            -- Same geometry as the early-divergence test above: the edit leaves
+            -- about 31 cold chars to recompute. That is below growth_slack but
+            -- above divergence_slack, so the split should re-pin fresh.
+            vim.api.nvim_buf_set_text(divergence_bufnr, 0, 419, 0, 420, { 'X' })
+
+            local divergence_context = utils.get_context(utils.make_cmp_context(), nil, {
+                prev_lines_before = divergence_baseline.lines_before,
+                prev_lines_after = divergence_baseline.lines_after,
+                growth_slack = 80,
+                divergence_slack = 16,
+            })
+
+            helpers.expect_falsy(divergence_context.opts.anchored, 'divergence uses the smaller cold-tail slack')
+            helpers.expect_equal(vim.fn.strchars(divergence_context.lines_before), 100)
+            helpers.delete_buffer(divergence_bufnr)
+        end,
+    },
+
+    {
         name = 'utils.get_context does not reuse a rewound anchor below the floor',
         run = function()
             helpers.setup_root_config {
