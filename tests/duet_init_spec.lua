@@ -394,6 +394,135 @@ return {
         end,
     },
     {
+        name = 'duet accept_or_next ignores its own TextChanged after partial accept',
+        run = function()
+            helpers.setup_root_config {
+                duet = {
+                    preview = { cursor = '|' },
+                    session = { prefetch_after_preview = false },
+                },
+            }
+            local captured = install_chat_stub()
+            local duet = helpers.reload 'minuet.duet'
+            duet.setup()
+
+            local bufnr = helpers.create_buffer({
+                'local total = 0',
+                'log("start")',
+                'count = count + 1',
+                'log("mid")',
+                'print(count)',
+            }, { 3, 0 })
+            require('minuet.duet.session').rebase(bufnr)
+            local patch = table.concat({
+                '*** Begin Patch',
+                '*** Update File: buf',
+                '@@',
+                '-local total = 0',
+                '-log("start")',
+                '-count = count + 1',
+                '-log("mid")',
+                '-print(count)',
+                '+local total = 0',
+                '+log("start")',
+                '+total = total + 1',
+                '+log("mid")',
+                '+print(total)',
+                '*** End Patch',
+            }, '\n')
+
+            duet.action.predict()
+            captured.callback(patch_call(patch))
+            helpers.wait_until(function()
+                return duet.action.is_visible()
+            end, 1000, 'preview did not render')
+
+            duet.action.accept_or_next() -- accept the first `count`, auto-advance to the second
+            helpers.expect_equal(vim.api.nvim_buf_get_lines(bufnr, 0, -1, false)[3], 'total = count + 1')
+            helpers.expect_equal(vim.api.nvim_win_get_cursor(0), { 3, #'total = ' })
+
+            -- Neovim may deliver TextChanged for the programmatic set_lines used
+            -- by partial accept. That event must not force the next Tab to
+            -- navigate away from the chunk already selected by auto-advance.
+            vim.cmd 'doautocmd <nomodeline> TextChanged'
+            duet.action.accept_or_next()
+            helpers.expect_equal(vim.api.nvim_buf_get_lines(bufnr, 0, -1, false)[3], 'total = total + 1')
+            helpers.expect_equal(vim.api.nvim_win_get_cursor(0), { 5, #'print(' })
+
+            duet.action.accept_or_next()
+            helpers.expect_equal(vim.api.nvim_buf_get_lines(bufnr, 0, -1, false), {
+                'local total = 0',
+                'log("start")',
+                'total = total + 1',
+                'log("mid")',
+                'print(total)',
+            })
+            helpers.expect_falsy(duet.action.is_visible(), 'all chunks should be accepted')
+            helpers.delete_buffer(bufnr)
+        end,
+    },
+    {
+        name = 'duet accept_or_next reveals a collapsed block when cursor starts on its marker',
+        run = function()
+            helpers.setup_root_config {
+                duet = {
+                    preview = { cursor = '|' },
+                    session = { prefetch_after_preview = false },
+                },
+            }
+            local captured = install_chat_stub()
+            local duet = helpers.reload 'minuet.duet'
+            duet.setup()
+
+            local original = {
+                'local function div(a, b)',
+                '    return a / b',
+                'end',
+            }
+            local proposed = {
+                'local function div(a, b)',
+                '    if b == 0 then',
+                '        return 0',
+                '    end',
+                '    return a / b',
+                'end',
+            }
+            local bufnr = helpers.create_buffer(original, { 1, 0 })
+            require('minuet.duet.session').rebase(bufnr)
+            local patch = table.concat({
+                '*** Begin Patch',
+                '*** Update File: buf',
+                '@@',
+                '-local function div(a, b)',
+                '-    return a / b',
+                '-end',
+                '+local function div(a, b)',
+                '+    if b == 0 then',
+                '+        return 0',
+                '+    end',
+                '+    return a / b',
+                '+end',
+                '*** End Patch',
+            }, '\n')
+
+            duet.action.predict()
+            captured.callback(patch_call(patch))
+            helpers.wait_until(function()
+                return duet.action.is_visible()
+            end, 1000, 'preview did not render')
+            helpers.expect_equal(vim.api.nvim_win_get_cursor(0), { 1, 0 })
+
+            duet.action.accept_or_next()
+            helpers.expect_equal(vim.api.nvim_buf_get_lines(bufnr, 0, -1, false), original)
+            helpers.expect_truthy(duet.action.is_visible(), 'first Tab should reveal, not accept')
+
+            duet.action.accept_or_next()
+            helpers.expect_equal(vim.api.nvim_buf_get_lines(bufnr, 0, -1, false), proposed)
+            helpers.expect_falsy(duet.action.is_visible(), 'second Tab should accept the revealed block')
+            helpers.delete_buffer(bufnr)
+        end,
+    },
+    {
         name = 'duet prefetch queues the simulated-after-accept prediction',
         run = function()
             helpers.setup_root_config {

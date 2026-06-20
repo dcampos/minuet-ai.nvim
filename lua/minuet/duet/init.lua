@@ -15,6 +15,7 @@ local internal = {
     states = {},
     request_seq = 0,
     auto_request_times = {}, -- bufnr -> millisecond timestamps in the last second
+    programmatic_changedticks = {}, -- bufnr -> changedtick from duet's own buffer edits
     memory = {}, -- bufnr -> list of { patch, result }: inter-diff memory of shown predictions
     shown_mem = nil, -- the memory entry for the preview currently on screen
 }
@@ -714,6 +715,7 @@ local function apply()
     local target_row = first_diff_row(original, proposed)
 
     api.nvim_buf_set_lines(bufnr, 0, -1, false, proposed)
+    internal.programmatic_changedticks[bufnr] = utils.get_changedtick(bufnr)
     session.record_accepted_edit(bufnr, original, proposed, scfg().history_context_lines)
 
     target_row = math.min(target_row, #proposed)
@@ -748,6 +750,7 @@ end
 
 local function finish_accept(bufnr, state, before, after, keep_partial)
     api.nvim_buf_set_lines(bufnr, 0, -1, false, after)
+    internal.programmatic_changedticks[bufnr] = utils.get_changedtick(bufnr)
     session.record_accepted_edit(bufnr, before, after, scfg().history_context_lines)
     state.changedtick = utils.get_changedtick(bufnr)
 
@@ -838,10 +841,15 @@ local function accept_or_next()
     end
 
     local _, active_idx = preview.current_chunk(state)
-    local _, cursor_idx = preview.chunk_at_cursor(state)
+    local cursor_chunk, cursor_idx = preview.chunk_at_cursor(state)
     if cursor_idx and (active_idx == nil or active_idx == cursor_idx) then
+        if active_idx == cursor_idx or (cursor_chunk and cursor_chunk.visible_by_default) then
+            state.preview_active = cursor_idx
+            accept_chunk()
+            return
+        end
         state.preview_active = cursor_idx
-        accept_chunk()
+        preview.render(bufnr, state)
         return
     end
 
@@ -904,6 +912,15 @@ local function on_edit(info)
     if not is_file_buffer(bufnr) then
         return -- ignore edits on the inspect float / scratch buffers
     end
+    local changedtick = utils.get_changedtick(bufnr)
+    local programmatic_changedtick = internal.programmatic_changedticks[bufnr]
+    if programmatic_changedtick then
+        internal.programmatic_changedticks[bufnr] = nil
+        if changedtick == programmatic_changedtick then
+            return
+        end
+    end
+
     local state = internal.states[bufnr]
     if state and state.proposed_lines and state.original_lines then
         local current = buf_lines(bufnr)
