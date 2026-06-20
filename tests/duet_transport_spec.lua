@@ -208,4 +208,68 @@ return {
             end
         end,
     },
+    {
+        name = 'Inception Mercury Edit treats an omitted trailing cursor blank as no edit',
+        run = function()
+            local original_api_key = vim.env.INCEPTION_API_KEY
+            local original_mock_content = vim.env.MINUET_MOCK_INCEPTION_CONTENT
+            local bufnr
+
+            local ok, err = xpcall(function()
+                local mock = vim.fn.getcwd() .. '/tests/scripts/mock_inception_edit.sh'
+                vim.env.INCEPTION_API_KEY = 'test-key'
+                vim.env.MINUET_MOCK_INCEPTION_CONTENT = '$'
+
+                helpers.setup_root_config {
+                    curl_cmd = mock,
+                    duet = {
+                        provider = 'inception_edit',
+                        request_timeout = 5,
+                        provider_options = {
+                            inception_edit = {
+                                end_point = 'http://127.0.0.1/inception-edit-mock',
+                                model = 'mercury-edit-2',
+                                api_key = 'INCEPTION_API_KEY',
+                                name = 'Inception Fixture',
+                                lines_before = 1,
+                                lines_after = 0,
+                                max_tokens = 128,
+                                optional = {},
+                            },
+                        },
+                    },
+                }
+
+                bufnr = helpers.create_buffer({ '$', '' }, { 2, 0 })
+                require('minuet.duet.session').clear(bufnr)
+                require('minuet.duet.session').rebase(bufnr)
+                local chat = helpers.reload 'minuet.duet.chat'
+
+                local done, result = false, nil
+                chat.request({}, {}, function(r)
+                    result = r
+                    done = true
+                end, { bufnr = bufnr, mode = 'auto' })
+                helpers.wait_until(function()
+                    return done
+                end, 3000, 'auto trailing blank Mercury response did not complete')
+
+                helpers.expect_falsy(
+                    result.direct_edit,
+                    'omitted cursor-only trailing blank line should not become a deletion'
+                )
+                helpers.expect_match(result.message.content, '%*%*%* No Edit')
+                helpers.expect_equal(result.inspect.outcome, 'no edit')
+                helpers.expect_equal(result.inspect.replacement, '$')
+            end, debug.traceback)
+
+            vim.env.INCEPTION_API_KEY = original_api_key
+            vim.env.MINUET_MOCK_INCEPTION_CONTENT = original_mock_content
+            helpers.delete_buffer(bufnr)
+
+            if not ok then
+                error(err)
+            end
+        end,
+    },
 }

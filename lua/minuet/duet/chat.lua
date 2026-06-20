@@ -20,11 +20,39 @@ end
 
 local function split_region(content)
     content = strip_markdown_fence(content or '')
+    local had_trailing_newline = content:sub(-1) == '\n'
     content = content:gsub('<|cursor|>', '')
-    if content:sub(-1) == '\n' then
+    if had_trailing_newline and content:sub(-1) == '\n' then
         content = content:sub(1, -2)
     end
     return vim.split(content, '\n', { plain = true })
+end
+
+local function is_same_region_or_eof_blank_elided(region, replacement, bufnr)
+    if vim.deep_equal(region.original_lines, replacement) then
+        return true
+    end
+
+    if not (bufnr and vim.api.nvim_buf_is_valid(bufnr)) then
+        return false
+    end
+    if region.end_row ~= vim.api.nvim_buf_line_count(bufnr) then
+        return false
+    end
+
+    local trimmed = {}
+    for i = 1, #replacement do
+        trimmed[i] = region.original_lines[i]
+    end
+    if not vim.deep_equal(trimmed, replacement) then
+        return false
+    end
+    for i = #replacement + 1, #(region.original_lines or {}) do
+        if region.original_lines[i] ~= '' then
+            return false
+        end
+    end
+    return #replacement < #(region.original_lines or {})
 end
 
 local function request_inception_edit(opts, callback, ctx)
@@ -153,7 +181,7 @@ local function request_inception_edit(opts, callback, ctx)
             else
                 inspect.replacement = 'None'
             end
-            if not replacement or vim.deep_equal(region.original_lines, replacement) then
+            if not replacement or is_same_region_or_eof_blank_elided(region, replacement, ctx.bufnr) then
                 inspect.outcome = 'no edit'
                 if ctx.mode == 'manual' then
                     inspect.error = 'Mercury Edit returned no change for manual prediction'
