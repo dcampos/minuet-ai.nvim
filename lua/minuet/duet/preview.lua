@@ -9,7 +9,7 @@ M.ns_id = api.nvim_create_namespace 'minuet.duet'
 
 local LINE_HL_PRIORITY = 100
 local TEXT_HL_PRIORITY = 110
-local ACTIVE_HL_PRIORITY = 120
+local MARKER_HL_PRIORITY = 120
 
 local default_highlights = {
     MinuetDuetAdd = { link = 'DiffAdd' },
@@ -19,7 +19,6 @@ local default_highlights = {
     MinuetDuetComment = { link = 'Comment' },
     MinuetDuetCursor = { link = 'IncSearch' },
     MinuetDuetMarker = { bg = 0x2f5fba },
-    MinuetDuetActive = { link = 'Visual' },
 }
 
 for hl_group, default_hl in pairs(default_highlights) do
@@ -163,7 +162,7 @@ local function inline_ts_virt_text(bufnr, chunk, group)
     })
 end
 
-local function render_inline_chunk(bufnr, state, chunk, cursor_char, active)
+local function render_inline_chunk(bufnr, state, chunk)
     local row = chunk.anchor_row
     local groups = chunk.groups or diff.text_groups(chunk.old_line or '', chunk.new_line or '')
     local group = groups[chunk.group_index or 1]
@@ -174,23 +173,18 @@ local function render_inline_chunk(bufnr, state, chunk, cursor_char, active)
     if group.old_start_col and group.old_end_col and group.old_end_col > group.old_start_col then
         add_extmark(bufnr, state, row, {
             end_col = group.old_end_col,
-            hl_group = active and 'MinuetDuetActive' or 'MinuetDuetDeleteText',
-            priority = active and ACTIVE_HL_PRIORITY or TEXT_HL_PRIORITY,
+            hl_group = 'MinuetDuetDeleteText',
+            priority = TEXT_HL_PRIORITY,
         }, group.old_start_col)
     end
 
     if group.new_text ~= '' then
         local col = group.old_end_col or group.insert_col
-        local virt_text
-        if active then
-            virt_text = { { group.new_text, 'MinuetDuetActive' } }
-        else
-            virt_text = inline_ts_virt_text(bufnr, chunk, group) or { { group.new_text, 'MinuetDuetAddText' } }
-        end
+        local virt_text = inline_ts_virt_text(bufnr, chunk, group) or { { group.new_text, 'MinuetDuetAddText' } }
         add_extmark(bufnr, state, row, {
             virt_text = virt_text,
             virt_text_pos = 'inline',
-            priority = active and ACTIVE_HL_PRIORITY or TEXT_HL_PRIORITY,
+            priority = TEXT_HL_PRIORITY,
         }, col)
     end
 end
@@ -210,7 +204,7 @@ local function render_marker(bufnr, state, chunk)
         add_extmark(bufnr, state, chunk.anchor_row, {
             virt_text = { { ' ', 'MinuetDuetMarker' } },
             virt_text_pos = 'inline',
-            priority = ACTIVE_HL_PRIORITY,
+            priority = MARKER_HL_PRIORITY,
         }, col)
         return
     end
@@ -218,7 +212,7 @@ local function render_marker(bufnr, state, chunk)
     add_extmark(bufnr, state, chunk.anchor_row, {
         end_col = col + char_len,
         hl_group = 'MinuetDuetMarker',
-        priority = ACTIVE_HL_PRIORITY,
+        priority = MARKER_HL_PRIORITY,
     }, col)
 end
 
@@ -453,7 +447,7 @@ function M.render(bufnr, state)
         local reveal = chunk.visible_by_default or active or (active_hunk ~= nil and chunk.hunk_id == active_hunk)
         if reveal then
             if chunk.kind == 'inline' then
-                render_inline_chunk(bufnr, state, chunk, cursor_char, active)
+                render_inline_chunk(bufnr, state, chunk)
             else
                 render_block_chunk(bufnr, state, chunk, cursor_char)
             end

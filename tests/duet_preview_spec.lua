@@ -345,24 +345,25 @@ return {
 
             preview.select_next_chunk(bufnr, state)
             extmarks = get_extmarks(bufnr, preview.ns_id)
-            local active_virt, sibling_virt, post_markers = nil, nil, 0
+            local first_virt, second_virt, post_markers = nil, nil, 0
             for _, extmark in ipairs(extmarks) do
                 local d = extmark[4]
                 if d.hl_group == 'MinuetDuetMarker' then
                     post_markers = post_markers + 1
                 elseif d.virt_text then
-                    if vim.deep_equal(d.virt_text, { { '2', 'MinuetDuetActive' } }) then
-                        active_virt = true
+                    if vim.deep_equal(d.virt_text, { { '2', 'MinuetDuetAddText' } }) then
+                        first_virt = true
                     elseif vim.deep_equal(d.virt_text, { { '3', 'MinuetDuetAddText' } }) then
-                        sibling_virt = true
+                        second_virt = true
                     end
                 end
             end
-            -- Selecting one change reveals the whole hunk: the active group is
-            -- emphasized, its sibling shows as a normal add, and no marker remains.
+            -- Selecting one change reveals the whole hunk as a plain add/delete
+            -- diff (no blue "active" tint -- the cursor marks the next change) and
+            -- no marker remains.
             helpers.expect_equal(post_markers, 0, 'revealing the hunk should drop its marker')
-            helpers.expect_truthy(active_virt, 'active change should render with the active highlight')
-            helpers.expect_truthy(sibling_virt, 'sibling change in the same hunk should also be revealed')
+            helpers.expect_truthy(first_virt, 'first change should render as a normal add')
+            helpers.expect_truthy(second_virt, 'second change in the same hunk should also be revealed')
 
             helpers.delete_buffer(bufnr)
         end,
