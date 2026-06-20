@@ -18,7 +18,7 @@ local default_highlights = {
     MinuetDuetDeleteText = { bg = 0x9a3f55 },
     MinuetDuetComment = { link = 'Comment' },
     MinuetDuetCursor = { link = 'IncSearch' },
-    MinuetDuetMarker = { bg = 0x2f5fba, fg = 0x2f5fba },
+    MinuetDuetMarker = { bg = 0x2f5fba },
     MinuetDuetActive = { link = 'Visual' },
 }
 
@@ -195,11 +195,26 @@ local function render_inline_chunk(bufnr, state, chunk, cursor_char, active)
     end
 end
 
+--- Mark a collapsed (not-yet-revealed) change with a small blue square that does
+--- NOT cover the code: a background tint behind the anchor line's first
+--- character (MinuetDuetMarker is bg-only, so the glyph keeps its syntax color).
+--- Empty anchor lines have no glyph to tint, so fall back to a one-cell inline
+--- blue square (nothing to shift on an empty line).
 local function render_marker(bufnr, state, chunk)
-    local marker = ((require('minuet').config.duet.preview or {}).marker or ' ')
+    local line_count = math.max(api.nvim_buf_line_count(bufnr), 1)
+    local row = math.min(math.max(0, chunk.anchor_row), line_count - 1)
+    local first = api.nvim_buf_get_lines(bufnr, row, row + 1, false)[1] or ''
+    if first == '' then
+        add_extmark(bufnr, state, chunk.anchor_row, {
+            virt_text = { { ' ', 'MinuetDuetMarker' } },
+            virt_text_pos = 'inline',
+            priority = ACTIVE_HL_PRIORITY,
+        }, 0)
+        return
+    end
     add_extmark(bufnr, state, chunk.anchor_row, {
-        virt_text = { { marker, 'MinuetDuetMarker' } },
-        virt_text_pos = 'overlay',
+        end_col = vim.fn.byteidx(first, 1),
+        hl_group = 'MinuetDuetMarker',
         priority = ACTIVE_HL_PRIORITY,
     }, 0)
 end

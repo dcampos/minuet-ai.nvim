@@ -280,9 +280,14 @@ return {
             preview.render(bufnr, state)
             local extmarks = get_extmarks(bufnr, preview.ns_id)
             helpers.expect_equal(#extmarks, 1)
-            helpers.expect_equal(extmarks[1][4].virt_text, {
-                { ' ', 'MinuetDuetMarker' },
-            })
+            -- The collapsed marker is a background tint behind the anchor line's
+            -- first character (a blue square that does not cover the glyph), not
+            -- an overlay virt_text. Anchor here is 'three', so end_col == 1.
+            helpers.expect_equal(extmarks[1][2], 2)
+            helpers.expect_equal(extmarks[1][3], 0)
+            helpers.expect_equal(extmarks[1][4].hl_group, 'MinuetDuetMarker')
+            helpers.expect_equal(extmarks[1][4].end_col, 1)
+            helpers.expect_falsy(extmarks[1][4].virt_text)
             helpers.expect_falsy(extmarks[1][4].virt_lines)
 
             preview.select_next_chunk(bufnr, state)
