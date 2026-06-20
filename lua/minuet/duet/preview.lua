@@ -326,12 +326,10 @@ local function block_ts_chunks(bufnr, chunk)
     })
 end
 
-local function render_block_chunk(bufnr, state, chunk, cursor_char, active)
-    if not active and not chunk.visible_by_default then
-        render_marker(bufnr, state, chunk)
-        return
-    end
-
+--- Render the full block diff (deleted lines + proposed virt_lines). The
+--- caller decides whether the block is revealed or collapsed to a marker, so
+--- this is only invoked for revealed blocks.
+local function render_block_chunk(bufnr, state, chunk, cursor_char)
     for offset = 0, chunk.old_count - 1 do
         local row = chunk.anchor_row - chunk.old_count + 1 + offset
         local old_line = chunk.old_lines[offset + 1] or ''
@@ -437,16 +435,31 @@ function M.render(bufnr, state)
         return
     end
 
+    -- A diff hunk is one continuous block of changed lines and may hold several
+    -- changes that Tab approves one at a time. Navigating to any change reveals
+    -- the whole hunk's diff at once (stepping through each tiny change is too
+    -- low-info), while approval stays per-chunk: only the active chunk is the
+    -- accept target. A collapsed hunk shows a single blue square at its first
+    -- change, not one square per change.
+    local active_chunk = state.preview_active and state.preview_chunks[state.preview_active]
+    local active_hunk = active_chunk and active_chunk.hunk_id
+    local hunk_marked = {}
+
     for i, chunk in ipairs(state.preview_chunks) do
         local active = state.preview_active == i
-        if chunk.kind == 'inline' then
-            if chunk.visible_by_default or active then
+        local reveal = chunk.visible_by_default or active or (active_hunk ~= nil and chunk.hunk_id == active_hunk)
+        if reveal then
+            if chunk.kind == 'inline' then
                 render_inline_chunk(bufnr, state, chunk, cursor_char, active)
             else
-                render_marker(bufnr, state, chunk)
+                render_block_chunk(bufnr, state, chunk, cursor_char)
             end
         else
-            render_block_chunk(bufnr, state, chunk, cursor_char, active)
+            local hunk_key = chunk.hunk_id or i
+            if not hunk_marked[hunk_key] then
+                hunk_marked[hunk_key] = true
+                render_marker(bufnr, state, chunk)
+            end
         end
     end
 

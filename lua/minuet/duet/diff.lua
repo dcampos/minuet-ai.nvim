@@ -22,6 +22,7 @@ local M = {}
 ---@field group_index? integer
 ---@field visible_by_default boolean
 ---@field focus_kind? string
+---@field hunk_id? integer 1-based index of the diff hunk this chunk came from
 
 ---@class minuet.DuetTextGroup
 ---@field old_text string
@@ -528,7 +529,8 @@ end
 function M.build_chunks(original_lines, proposed_lines, range, opts)
     opts = opts or {}
     local chunks = {}
-    for _, hunk in ipairs(get_hunks(original_lines, proposed_lines)) do
+    for hunk_id, hunk in ipairs(get_hunks(original_lines, proposed_lines)) do
+        local hunk_first = #chunks + 1
         local old_start, old_count, new_start, new_count = hunk[1], hunk[2], hunk[3], hunk[4]
         local old_hunk = vim.list_slice(original_lines, old_start, old_start + old_count - 1)
         local new_hunk = vim.list_slice(proposed_lines, new_start, new_start + new_count - 1)
@@ -565,6 +567,10 @@ function M.build_chunks(original_lines, proposed_lines, range, opts)
             opts,
             chunks
         )
+
+        for k = hunk_first, #chunks do
+            chunks[k].hunk_id = hunk_id
+        end
     end
 
     table.sort(chunks, function(a, b)

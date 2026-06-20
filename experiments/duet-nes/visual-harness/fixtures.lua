@@ -75,6 +75,23 @@ return {
         select = true,
     },
 
+    vector_diagnostic = {
+        note = 'multi-change hunk collapsed in diagnostic focus -> a single blue square',
+        filetype = 'lua',
+        original = { 'local vec = { y_1, y_5, y_6 }' },
+        proposed = { 'local vec = { y_1, y_2, y_3 }' },
+        focus = 'diagnostic',
+    },
+
+    vector_revealed = {
+        note = 'same hunk after Tab navigates in -> whole hunk diff shown at once',
+        filetype = 'lua',
+        original = { 'local vec = { y_1, y_5, y_6 }' },
+        proposed = { 'local vec = { y_1, y_2, y_3 }' },
+        focus = 'diagnostic',
+        select = true,
+    },
+
     func_rewrite = {
         note = 'multi-line function body change with strings/keywords (TS color demo)',
         filetype = 'lua',

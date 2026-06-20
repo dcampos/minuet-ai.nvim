@@ -305,6 +305,63 @@ return {
         end,
     },
     {
+        name = 'duet.preview collapses a multi-change hunk to one marker, reveals all on select',
+        run = function()
+            helpers.setup_root_config {
+                duet = {
+                    preview = {
+                        cursor = '|',
+                    },
+                },
+            }
+
+            local preview = helpers.reload 'minuet.duet.preview'
+            local line = 'vec = [y_1, y_5, y_6]'
+            local bufnr = helpers.create_buffer({ line }, { 1, 0 })
+            local state = {
+                range = { start_row = 0, end_row = 1 },
+                original_lines = { line },
+                proposed_lines = { 'vec = [y_1, y_2, y_3]' },
+                -- Diagnostic focus collapses inline changes; the line carries two
+                -- word-diff groups (y_5->y_2, y_6->y_3) that are one diff hunk.
+                preview_focus = 'diagnostic',
+            }
+
+            preview.render(bufnr, state)
+            local extmarks = get_extmarks(bufnr, preview.ns_id)
+            local markers = 0
+            for _, extmark in ipairs(extmarks) do
+                if extmark[4].hl_group == 'MinuetDuetMarker' then
+                    markers = markers + 1
+                end
+            end
+            helpers.expect_equal(markers, 1, 'two changes in one hunk should show a single blue square')
+
+            preview.select_next_chunk(bufnr, state)
+            extmarks = get_extmarks(bufnr, preview.ns_id)
+            local active_virt, sibling_virt, post_markers = nil, nil, 0
+            for _, extmark in ipairs(extmarks) do
+                local d = extmark[4]
+                if d.hl_group == 'MinuetDuetMarker' then
+                    post_markers = post_markers + 1
+                elseif d.virt_text then
+                    if vim.deep_equal(d.virt_text, { { '2', 'MinuetDuetActive' } }) then
+                        active_virt = true
+                    elseif vim.deep_equal(d.virt_text, { { '3', 'MinuetDuetAddText' } }) then
+                        sibling_virt = true
+                    end
+                end
+            end
+            -- Selecting one change reveals the whole hunk: the active group is
+            -- emphasized, its sibling shows as a normal add, and no marker remains.
+            helpers.expect_equal(post_markers, 0, 'revealing the hunk should drop its marker')
+            helpers.expect_truthy(active_virt, 'active change should render with the active highlight')
+            helpers.expect_truthy(sibling_virt, 'sibling change in the same hunk should also be revealed')
+
+            helpers.delete_buffer(bufnr)
+        end,
+    },
+    {
         name = 'duet.preview keeps strong whitespace highlights in block diffs',
         run = function()
             helpers.setup_root_config {
