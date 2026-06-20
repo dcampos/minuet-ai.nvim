@@ -370,20 +370,26 @@ return {
                 return duet.action.is_visible()
             end, 1000, 'preview did not render')
 
+            -- Tab 1: navigate to the first change (reveal); cursor lands on it,
+            -- nothing accepted yet.
             duet.action.accept_or_next()
             helpers.expect_equal(vim.api.nvim_win_get_cursor(0), { 1, #'return ' })
             helpers.expect_equal(vim.api.nvim_buf_get_lines(bufnr, 0, -1, false), { 'return alpha + beta' })
 
+            -- Tab 2: accept the first change, then auto-advance within the same
+            -- response -- the cursor moves onto the second change with no
+            -- re-collapse, so the next Tab accepts it directly.
             duet.action.accept_or_next()
             helpers.expect_equal(vim.api.nvim_buf_get_lines(bufnr, 0, -1, false), { 'return omega + beta' })
-            helpers.expect_truthy(duet.action.is_visible(), 'remaining chunk should stay visible')
-
-            duet.action.accept_or_next()
             helpers.expect_equal(vim.api.nvim_win_get_cursor(0), { 1, #'return omega + ' })
+            helpers.expect_truthy(duet.action.is_visible(), 'second change should stay revealed')
 
+            -- Tab 3: accept the second (last) change -- the response is fully
+            -- applied and the preview clears (crossing to any next response would
+            -- need its own Tab).
             duet.action.accept_or_next()
             helpers.expect_equal(vim.api.nvim_buf_get_lines(bufnr, 0, -1, false), { 'return omega + gamma' })
-            helpers.expect_falsy(duet.action.is_visible(), 'all chunks were accepted')
+            helpers.expect_falsy(duet.action.is_visible(), 'all changes accepted')
             helpers.delete_buffer(bufnr)
         end,
     },

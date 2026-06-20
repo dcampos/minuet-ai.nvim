@@ -329,13 +329,19 @@ return {
 
             preview.render(bufnr, state)
             local extmarks = get_extmarks(bufnr, preview.ns_id)
-            local markers = 0
+            local markers, marker_col = 0, nil
             for _, extmark in ipairs(extmarks) do
                 if extmark[4].hl_group == 'MinuetDuetMarker' then
                     markers = markers + 1
+                    marker_col = extmark[3]
                 end
             end
             helpers.expect_equal(markers, 1, 'two changes in one hunk should show a single blue square')
+            -- The square sits on the hunk's first change (the '5' of y_5), not at
+            -- the start of the line.
+            local first_change_col = state.preview_chunks[1].anchor_col
+            helpers.expect_equal(first_change_col, #'vec = [y_1, y_')
+            helpers.expect_equal(marker_col, first_change_col)
 
             preview.select_next_chunk(bufnr, state)
             extmarks = get_extmarks(bufnr, preview.ns_id)

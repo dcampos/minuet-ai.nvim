@@ -195,28 +195,31 @@ local function render_inline_chunk(bufnr, state, chunk, cursor_char, active)
     end
 end
 
---- Mark a collapsed (not-yet-revealed) change with a small blue square that does
---- NOT cover the code: a background tint behind the anchor line's first
---- character (MinuetDuetMarker is bg-only, so the glyph keeps its syntax color).
---- Empty anchor lines have no glyph to tint, so fall back to a one-cell inline
---- blue square (nothing to shift on an empty line).
+--- Mark a collapsed (not-yet-revealed) hunk with a small blue square at its
+--- first change: a background tint behind the changed glyph (MinuetDuetMarker is
+--- bg-only, so the glyph keeps its syntax color). When the change sits at end of
+--- line / on an empty line there is no glyph to tint, so fall back to a one-cell
+--- inline blue square at the change column.
 local function render_marker(bufnr, state, chunk)
     local line_count = math.max(api.nvim_buf_line_count(bufnr), 1)
     local row = math.min(math.max(0, chunk.anchor_row), line_count - 1)
-    local first = api.nvim_buf_get_lines(bufnr, row, row + 1, false)[1] or ''
-    if first == '' then
+    local line = api.nvim_buf_get_lines(bufnr, row, row + 1, false)[1] or ''
+    local col = math.max(0, math.min(chunk.anchor_col or 0, #line))
+    local b = line:byte(col + 1)
+    if not b then
         add_extmark(bufnr, state, chunk.anchor_row, {
             virt_text = { { ' ', 'MinuetDuetMarker' } },
             virt_text_pos = 'inline',
             priority = ACTIVE_HL_PRIORITY,
-        }, 0)
+        }, col)
         return
     end
+    local char_len = (b < 0x80 and 1) or (b < 0xe0 and 2) or (b < 0xf0 and 3) or 4
     add_extmark(bufnr, state, chunk.anchor_row, {
-        end_col = vim.fn.byteidx(first, 1),
+        end_col = col + char_len,
         hl_group = 'MinuetDuetMarker',
         priority = ACTIVE_HL_PRIORITY,
-    }, 0)
+    }, col)
 end
 
 local function block_anchor(chunk)

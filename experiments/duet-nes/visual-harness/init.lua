@@ -91,34 +91,38 @@ local state = {
 
 preview.render(buf, state)
 
--- Accept the currently active chunk at the preview level, mirroring the real
--- finish_accept partial path: apply the chunk, fold it into original_lines, drop
--- the active selection, and re-render (remaining changes recollapse to a marker).
-local function accept_active()
+-- One <Tab> press, mirroring duet.action.accept_or_next for the visible-preview
+-- case: if the cursor is on the active change, accept it (and auto-advance to the
+-- next change within the same response, no re-collapse); otherwise navigate to
+-- and reveal the next change. Model-free, so it lives here rather than init.lua.
+local function tab()
     preview.rebuild_chunks(state)
-    local chunk = select(1, preview.current_chunk(state))
-    if not chunk then
-        return
+    local _, active_idx = preview.current_chunk(state)
+    local _, cursor_idx = preview.chunk_at_cursor(state)
+    if cursor_idx and (active_idx == nil or active_idx == cursor_idx) then
+        state.preview_active = cursor_idx
+        local chunk = select(1, preview.current_chunk(state))
+        local before = vim.api.nvim_buf_get_lines(buf, 0, -1, false)
+        local after = preview.apply_chunk(before, chunk)
+        vim.api.nvim_buf_set_lines(buf, 0, -1, false, after)
+        state.original_lines = after
+        state.preview_active = nil
+        if vim.deep_equal(after, state.proposed_lines) then
+            preview.render(buf, state) -- response fully applied: marks clear
+        else
+            preview.select_next_chunk(buf, state) -- auto-advance within response
+        end
+    else
+        preview.select_next_chunk(buf, state)
     end
-    local before = vim.api.nvim_buf_get_lines(buf, 0, -1, false)
-    local after = preview.apply_chunk(before, chunk)
-    vim.api.nvim_buf_set_lines(buf, 0, -1, false, after)
-    state.original_lines = after
-    state.preview_active = nil
-    preview.render(buf, state)
 end
 
--- MINUET_STEPS replays the Tab workflow one action per step so each value
--- screenshots a distinct frame: odd step = navigate (reveal the hunk), even
--- step = accept one change. Falls back to fx.select for the single-shot case.
+-- MINUET_STEPS replays the Tab workflow: each value screenshots the state after
+-- that many <Tab> presses. Falls back to fx.select for the single-shot case.
 local steps = tonumber(os.getenv 'MINUET_STEPS' or '') or 0
 if steps > 0 then
-    for n = 1, steps do
-        if n % 2 == 1 then
-            pcall(preview.select_next_chunk, buf, state)
-        else
-            accept_active()
-        end
+    for _ = 1, steps do
+        tab()
     end
 elseif fx.select then
     pcall(preview.select_next_chunk, buf, state)

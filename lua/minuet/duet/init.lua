@@ -772,9 +772,15 @@ local function finish_accept(bufnr, state, before, after, keep_partial)
             internal.shown.result = 'partially accepted'
         end
         state.original_lines = after
-        state.needs_navigation_after_accept = true
         state.preview_active = nil
-        preview.render(bufnr, state)
+        state.needs_navigation_after_accept = nil
+        -- Auto-advance within the same model response: reveal and select the next
+        -- change (the next one in this hunk, or the first change of the next hunk)
+        -- and move the cursor onto it, so the next <Tab> approves it directly --
+        -- no re-collapse to a marker between changes. A fully-applied response
+        -- took the full-accept branch above, so crossing into a *different*
+        -- response (next queued prediction) still needs its own explicit <Tab>.
+        preview.select_next_chunk(bufnr, state)
     end
 end
 
