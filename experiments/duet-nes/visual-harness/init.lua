@@ -90,7 +90,37 @@ local state = {
 }
 
 preview.render(buf, state)
-if fx.select then
+
+-- Accept the currently active chunk at the preview level, mirroring the real
+-- finish_accept partial path: apply the chunk, fold it into original_lines, drop
+-- the active selection, and re-render (remaining changes recollapse to a marker).
+local function accept_active()
+    preview.rebuild_chunks(state)
+    local chunk = select(1, preview.current_chunk(state))
+    if not chunk then
+        return
+    end
+    local before = vim.api.nvim_buf_get_lines(buf, 0, -1, false)
+    local after = preview.apply_chunk(before, chunk)
+    vim.api.nvim_buf_set_lines(buf, 0, -1, false, after)
+    state.original_lines = after
+    state.preview_active = nil
+    preview.render(buf, state)
+end
+
+-- MINUET_STEPS replays the Tab workflow one action per step so each value
+-- screenshots a distinct frame: odd step = navigate (reveal the hunk), even
+-- step = accept one change. Falls back to fx.select for the single-shot case.
+local steps = tonumber(os.getenv 'MINUET_STEPS' or '') or 0
+if steps > 0 then
+    for n = 1, steps do
+        if n % 2 == 1 then
+            pcall(preview.select_next_chunk, buf, state)
+        else
+            accept_active()
+        end
+    end
+elseif fx.select then
     pcall(preview.select_next_chunk, buf, state)
 end
 
