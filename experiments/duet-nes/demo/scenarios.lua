@@ -156,6 +156,50 @@ return {
     },
 
     {
+        name = 'line_continuations',
+        title = 'Append line continuations at end of line',
+        blurb = 'End-of-line `\\` inserts: <Tab> jumps to each and accepting auto-advances to the next.',
+        filetype = 'lua',
+        cursor = { 1, 0 },
+        -- Every change here is an insertion at the very END of a line (a trailing
+        -- ` \`), which anchors one column past the line end -- exactly where the
+        -- normal-mode cursor clamps short. Two lines already carry the `\`; NES
+        -- proposes the rest (including turning the blank separator into a bare
+        -- `\`) so you can <Tab> through and accept each end-of-line insert in turn.
+        lines = {
+            '$',
+            "x' = 0 \\",
+            '=> 2x - 2x^2 + x y = 0 \\',
+            '=> x(2 - 2x + y) = 0',
+            '=> x = 0 "ó" 2x - y = +2',
+            '',
+            "y' = 0",
+            '=> 2y - 2y^2 + x y = 0',
+            '=> y(2 - 2y + x) = 0',
+            '=> y = 0 "ó" 2y - x = +2',
+            '$',
+        },
+        steps = {
+            {
+                note = 'Trailing `\\` inserts: <Tab> jumps to the first, accept auto-advances through the rest.',
+                after = {
+                    '$',
+                    "x' = 0 \\",
+                    '=> 2x - 2x^2 + x y = 0 \\',
+                    '=> x(2 - 2x + y) = 0 \\',
+                    '=> x = 0 "ó" 2x - y = +2 \\',
+                    '\\',
+                    "y' = 0 \\",
+                    '=> 2y - 2y^2 + x y = 0 \\',
+                    '=> y(2 - 2y + x) = 0 \\',
+                    '=> y = 0 "ó" 2y - x = +2',
+                    '$',
+                },
+            },
+        },
+    },
+
+    {
         name = 'deletions',
         title = 'Delete a line, then trim arguments',
         blurb = 'Two steps showing whole-line deletion then an inline deletion.',

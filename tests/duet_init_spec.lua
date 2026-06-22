@@ -523,6 +523,63 @@ return {
         end,
     },
     {
+        name = 'duet accept_or_next accepts and advances through end-of-line insertions',
+        run = function()
+            -- An end-of-line insertion (e.g. appending `\`) anchors one byte past
+            -- the last character, where the normal-mode cursor cannot land. The
+            -- accept/navigation must still recognize the cursor as on that chunk,
+            -- or every Tab just re-navigates to it and nothing can be accepted.
+            helpers.setup_root_config {
+                duet = {
+                    preview = { cursor = '|' },
+                    session = { prefetch_after_preview = false },
+                },
+            }
+            local captured = install_chat_stub()
+            local duet = helpers.reload 'minuet.duet'
+            duet.setup()
+
+            local bufnr = helpers.create_buffer({ 'return alpha', 'return beta' }, { 1, 0 })
+            require('minuet.duet.session').rebase(bufnr)
+            local patch = table.concat({
+                '*** Begin Patch',
+                '*** Update File: buf',
+                '@@',
+                '-return alpha',
+                '-return beta',
+                '+return alpha \\',
+                '+return beta \\',
+                '*** End Patch',
+            }, '\n')
+
+            duet.action.predict()
+            captured.callback(patch_call(patch))
+            helpers.wait_until(function()
+                return duet.action.is_visible()
+            end, 1000, 'preview did not render')
+
+            -- Tab 1: navigate to the first end-of-line change; cursor lands at the
+            -- last reachable column (one short of the anchor), nothing accepted.
+            duet.action.accept_or_next()
+            helpers.expect_equal(vim.api.nvim_buf_get_lines(bufnr, 0, -1, false), { 'return alpha', 'return beta' })
+
+            -- Tab 2: accept the first change despite the unreachable anchor, then
+            -- auto-advance to the second end-of-line change.
+            duet.action.accept_or_next()
+            helpers.expect_equal(vim.api.nvim_buf_get_lines(bufnr, 0, -1, false), { 'return alpha \\', 'return beta' })
+            helpers.expect_truthy(duet.action.is_visible(), 'second change should stay revealed')
+
+            -- Tab 3: accept the last change; the response is fully applied.
+            duet.action.accept_or_next()
+            helpers.expect_equal(
+                vim.api.nvim_buf_get_lines(bufnr, 0, -1, false),
+                { 'return alpha \\', 'return beta \\' }
+            )
+            helpers.expect_falsy(duet.action.is_visible(), 'all end-of-line changes accepted')
+            helpers.delete_buffer(bufnr)
+        end,
+    },
+    {
         name = 'duet prefetch queues the simulated-after-accept prediction',
         run = function()
             helpers.setup_root_config {

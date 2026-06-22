@@ -38,6 +38,23 @@ local function preview_opts(config, state)
     }
 end
 
+--- The last column (0-based byte) the normal-mode cursor can occupy on `line`:
+--- the start byte of its final character, or 0 on an empty line. A chunk anchored
+--- one byte past the last character -- an end-of-line insertion, e.g. appending
+--- `\` -- is therefore out of the cursor's reach, so navigating to it lands the
+--- cursor one column short. Comparisons that decide "is the cursor on this chunk?"
+--- must account for that, or the chunk can never be selected or accepted.
+local function last_cursor_col(line)
+    if line == '' then
+        return 0
+    end
+    local i = #line
+    while i > 1 and line:byte(i) >= 0x80 and line:byte(i) < 0xc0 do
+        i = i - 1 -- back over UTF-8 continuation bytes to the lead byte
+    end
+    return i - 1
+end
+
 local function add_extmark(bufnr, state, row, opts, col)
     state.extmark_ids = state.extmark_ids or {}
     row = math.max(0, row)
@@ -488,12 +505,23 @@ function M.chunk_at_cursor(state)
     if not state or not state.preview_chunks then
         return nil
     end
+    local bufnr = api.nvim_get_current_buf()
     local cursor = api.nvim_win_get_cursor(0)
     local row = cursor[1] - 1
     local col = cursor[2]
     for i, chunk in ipairs(state.preview_chunks) do
         if row == chunk.anchor_row and col == chunk.anchor_col then
             return chunk, i
+        end
+    end
+    -- An end-of-line anchor sits one byte past the last character, where the
+    -- cursor cannot land; treat the last reachable column as being on the chunk.
+    for i, chunk in ipairs(state.preview_chunks) do
+        if row == chunk.anchor_row then
+            local line = api.nvim_buf_get_lines(bufnr, row, row + 1, false)[1] or ''
+            if chunk.anchor_col >= #line and col == last_cursor_col(line) then
+                return chunk, i
+            end
         end
     end
     return nil
@@ -510,7 +538,12 @@ function M.select_next_chunk(bufnr, state)
     local col = cursor[2]
     local selected = nil
     for i, chunk in ipairs(state.preview_chunks) do
-        if chunk.anchor_row > row or (chunk.anchor_row == row and chunk.anchor_col > col) then
+        -- Compare against the reachable anchor column so the cursor sitting on an
+        -- out-of-reach end-of-line anchor still counts as "on" that chunk and we
+        -- advance past it, instead of re-selecting it forever.
+        local line = api.nvim_buf_get_lines(bufnr, chunk.anchor_row, chunk.anchor_row + 1, false)[1] or ''
+        local acol = math.min(chunk.anchor_col, last_cursor_col(line))
+        if chunk.anchor_row > row or (chunk.anchor_row == row and acol > col) then
             selected = i
             break
         end
