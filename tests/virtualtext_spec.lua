@@ -1196,6 +1196,150 @@ return {
         end,
     },
     {
+        name = 'virtualtext partial accept ignores delayed pre-accept callbacks',
+        run = function()
+            helpers.setup_root_config {
+                provider = 'test',
+                debounce = 0,
+                throttle = 0,
+                n_completions = 1,
+                virtualtext = {
+                    debounce = 0,
+                    throttle = 0,
+                    max_retries = 0,
+                    context_after_chars = 0,
+                },
+                provider_options = {
+                    test = {
+                        model = 'fixture-model',
+                        optional = {
+                            stop = { '\n' },
+                            max_tokens = 64,
+                        },
+                    },
+                },
+            }
+
+            local overrides = {
+                provider_options = {
+                    test = {
+                        optional = {
+                            stop = { '\n\n' },
+                            max_tokens = 256,
+                        },
+                    },
+                },
+            }
+
+            local backend_calls = 0
+            local pending_callback
+            package.loaded['minuet.backends.test'] = {
+                complete = function(_, callback)
+                    backend_calls = backend_calls + 1
+                    pending_callback = callback
+                end,
+            }
+
+            local virtualtext = helpers.reload 'minuet.virtualtext'
+            virtualtext.setup()
+
+            local original_lines = { 'El problema dual es', '$' }
+            local bufnr = helpers.create_buffer(original_lines, { 2, 1 })
+            local original_ve = vim.o.virtualedit
+            vim.o.virtualedit = 'onemore'
+            local original_mode = vim.fn.mode
+            vim.fn.mode = function()
+                return 'i'
+            end
+
+            virtualtext.action.next(overrides)
+            helpers.expect_equal(backend_calls, 1, 'manual multiline request should start one backend request')
+            helpers.expect_truthy(pending_callback, 'manual multiline request should be in flight')
+
+            pending_callback({ 'mat(\n  2, 1;\n  -4, 1;\n)' }, false)
+            helpers.expect_match(get_suggestion_text(bufnr, virtualtext.ns_id), '^mat%(')
+
+            virtualtext.action.accept_line()
+            local partially_accepted = get_suggestion_text(bufnr, virtualtext.ns_id)
+            helpers.expect_match(partially_accepted, '%-4, 1;', 'partial accept should keep the original remainder')
+
+            pending_callback({ 'mat(\n)' }, true)
+            helpers.expect_equal(
+                get_suggestion_text(bufnr, virtualtext.ns_id),
+                partially_accepted,
+                'late pre-accept callback must not repaint the current partial-accept remainder'
+            )
+
+            virtualtext.action.dismiss()
+            vim.fn.mode = original_mode
+            vim.o.virtualedit = original_ve
+            helpers.delete_buffer(bufnr)
+        end,
+    },
+    {
+        name = 'virtualtext partial accept ignores its own cursor-moved event at EOF',
+        run = function()
+            helpers.setup_root_config {
+                provider = 'test',
+                debounce = 0,
+                throttle = 0,
+                n_completions = 2,
+                virtualtext = {
+                    debounce = 0,
+                    throttle = 0,
+                    max_retries = 0,
+                    context_after_chars = 0,
+                },
+                provider_options = {
+                    test = {
+                        model = 'fixture-model',
+                        optional = {
+                            stop = { '\n\n' },
+                            max_tokens = 256,
+                        },
+                    },
+                },
+            }
+
+            package.loaded['minuet.backends.test'] = {
+                complete = function(_, callback)
+                    callback {
+                        'mat(\n  2, 1;\n  -4, 1;\n)',
+                        'mat(\n)',
+                    }
+                end,
+            }
+
+            local virtualtext = helpers.reload 'minuet.virtualtext'
+            virtualtext.setup()
+
+            local bufnr = helpers.create_buffer({ 'El problema dual es', '$' }, { 2, 1 })
+            local original_ve = vim.o.virtualedit
+            vim.o.virtualedit = 'onemore'
+            local original_mode = vim.fn.mode
+            vim.fn.mode = function()
+                return 'i'
+            end
+
+            virtualtext.action.fire()
+            virtualtext.action.accept_line()
+            local partially_accepted = get_suggestion_text(bufnr, virtualtext.ns_id)
+            helpers.expect_match(partially_accepted, '%-4, 1;', 'partial accept should keep the long remainder')
+
+            vim.api.nvim_exec_autocmds('CursorMovedI', { buffer = bufnr })
+            helpers.expect_equal(
+                get_suggestion_text(bufnr, virtualtext.ns_id),
+                partially_accepted,
+                'the cursor event caused by accept must not re-derive a different cached sibling'
+            )
+
+            virtualtext.action.dismiss()
+            vim.fn.mode = original_mode
+            vim.o.virtualedit = original_ve
+            helpers.delete_buffer(bufnr)
+        end,
+    },
+    {
         name = 'virtualtext fires concurrent requests and an older one still lands for its own state',
         run = function()
             helpers.setup_root_config {

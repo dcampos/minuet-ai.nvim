@@ -464,6 +464,7 @@ end
 ---@field distinct_silent? boolean the in-flight distinct fetch is a preemptive tail prefetch (no dots, no cycle)
 ---@field distinct_seen? table<string, true> completions already seen when the distinct fetch started
 ---@field distinct_attempts? integer requests fired so far for the current distinct fetch
+---@field skip_cursor_moved_after_accept? { row: integer, col: integer, changedtick: integer } cursor event caused by accept
 
 -- Provider callbacks capture this token; a *hard* cleanup bumps it so in-flight
 -- callbacks cannot repaint ghost text after an explicit dismiss / insert-leave.
@@ -1264,6 +1265,10 @@ local function accept_n_chars(n_chars)
 
     local function apply()
         ctx.in_accept = true
+        stop_timer()
+        -- Do not terminate in-flight jobs here. Let them populate ctx.cache, but
+        -- prevent their callbacks from repainting the sliced partial-accept view.
+        bump_request_generation(ctx)
         clear_preview()
         api.nvim_buf_set_text(0, line, col, line, col, lines)
         local new_col = #lines[#lines]
@@ -1275,10 +1280,18 @@ local function accept_n_chars(n_chars)
         if has_remaining then
             slide_locks_after_accept(ctx, to_insert)
             slice_suggestions_after_accept(ctx, to_insert)
+            if ctx.cur_before then
+                ctx.cur_before = ctx.cur_before .. to_insert
+            end
             update_preview(ctx)
         else
             reset_ctx(ctx)
         end
+        ctx.skip_cursor_moved_after_accept = {
+            row = line + #lines,
+            col = new_col,
+            changedtick = api.nvim_buf_get_changedtick(0),
+        }
         ctx.in_accept = nil
     end
 
@@ -1515,6 +1528,24 @@ function autocmd.on_cursor_moved_i()
     -- that and could repaint with stale state.
     if ctx.in_accept then
         return
+    end
+
+    -- In real insert mode the CursorMovedI caused by nvim_win_set_cursor can be
+    -- delivered after accept_n_chars has already sliced and repainted the
+    -- remainder. Do not immediately re-derive from sibling cache entries for that
+    -- same post-accept cursor state; the next genuine cursor move/edit should use
+    -- the normal cache path below.
+    local skip = ctx.skip_cursor_moved_after_accept
+    if skip then
+        ctx.skip_cursor_moved_after_accept = nil
+        local cursor = api.nvim_win_get_cursor(0)
+        if
+            cursor[1] == skip.row
+            and cursor[2] == skip.col
+            and api.nvim_buf_get_changedtick(bufnr) == skip.changedtick
+        then
+            return
+        end
     end
 
     -- Moving the cursor abandons any in-flight cycle-past-the-last fetch: the
