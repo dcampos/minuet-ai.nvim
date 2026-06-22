@@ -225,6 +225,7 @@ local function minuet_complete(arglead, cmdline, _)
             cycle = true,
             toggle = true,
             inspect = true,
+            history_format = { synthetic = true, unified = true, toggle = true, status = true },
         },
         virtualtext = {
             enable = true,

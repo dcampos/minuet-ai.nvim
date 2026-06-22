@@ -44,6 +44,21 @@ return {
         end,
     },
     {
+        name = 'session.render_diff_entry_unified keeps real line numbers and surrounding context',
+        run = function()
+            local block = session.render_diff_entry_unified(before, after, 'net.lua', 8)
+            helpers.expect_match(block, '^%-%-%- net%.lua\n%+%+%+ net%.lua')
+            -- faithful hunk header: real line numbers, NOT the synthetic -1,1 +1,1
+            helpers.expect_match(block, '\n@@ %-1,%d+ %+1,%d+ @@\n')
+            helpers.expect_falsy(block:find '@@ %-1,1 %+1,1 @@', 'must not be the synthetic header')
+            helpers.expect_match(block, '\n%-local timeout = 30')
+            helpers.expect_match(block, '\n%+local timeout_secs = 30')
+            -- unchanged surrounding lines ARE carried as context (unlike synthetic)
+            helpers.expect_match(block, 'local function connect%(host%)')
+            helpers.expect_falsy(session.render_diff_entry_unified(before, before, 'net.lua', 8))
+        end,
+    },
+    {
         name = 'session.diff_region returns the bounding changed block before/after',
         run = function()
             local original, updated, start_line = session.diff_region(before, after)
@@ -231,6 +246,31 @@ return {
                 '%-%-%- %[No Name%]\n%+%+%+ %[No Name%]\n@@ %-1,1 %+1,1 @@\n%-local x = 1\n%+local x = 10\n'
             )
             helpers.expect_equal(region.original_lines, { 'local x = 10', 'local y = 2', 'return x + y' })
+            helpers.delete_buffer(bufnr)
+        end,
+    },
+    {
+        name = "session.build_inception_edit_turn honors edit_history_format = 'unified'",
+        run = function()
+            local sc = require('minuet').config.duet.session
+            local prev = sc.edit_history_format
+            sc.edit_history_format = 'unified'
+
+            local bufnr = helpers.create_buffer({ 'local x = 1', 'local y = 2', 'return x + y' }, { 2, 9 })
+            session.clear(bufnr)
+            session.rebase(bufnr)
+
+            vim.api.nvim_buf_set_lines(bufnr, 0, 1, false, { 'local x = 10' })
+            vim.api.nvim_win_set_cursor(0, { 2, 9 })
+            session.capture(bufnr, 3)
+
+            local prompt = session.build_inception_edit_turn(bufnr, { lines_before = 1, lines_after = 1 })
+            helpers.expect_match(prompt, '<|edit_diff_history|>')
+            -- real line numbers + a context line, not the synthetic -1,1 +1,1 block
+            helpers.expect_match(prompt, '@@ %-1,%d+ %+1,%d+ @@\n%-local x = 1\n%+local x = 10\n local y = 2')
+            helpers.expect_falsy(prompt:find '@@ %-1,1 %+1,1 @@', 'unified format must not emit the synthetic header')
+
+            sc.edit_history_format = prev
             helpers.delete_buffer(bufnr)
         end,
     },

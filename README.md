@@ -1511,6 +1511,13 @@ The Minuet duet command provides manual next-edit prediction controls:
 - `:Minuet duet toggle`: Toggle duet auto-trigger for the current session.
 - `:Minuet duet dismiss`: Dismiss the current duet prediction preview.
 - `:Minuet duet inspect`: Show recent duet request/response history.
+- `:Minuet duet history_format synthetic|unified|toggle|status`: A/B switch for
+  how the `inception_edit` (Mercury Edit 2) prompt renders its
+  `edit_diff_history`. `synthetic` (default) is the compact range block that
+  propagates a repeated edit most aggressively; `unified` is a faithful diff
+  (real line numbers + context) that re-inserts a just-deleted line far less
+  often, at the cost of slightly weaker multi-site propagation. Mirrors the
+  `duet.session.edit_history_format` config option.
 
 ## `Minuet lsp`
 

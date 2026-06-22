@@ -670,4 +670,21 @@ return {
             helpers.delete_buffer(bufnr)
         end,
     },
+    {
+        name = 'duet history_format action group sets and toggles the config',
+        run = function()
+            helpers.setup_root_config {}
+            local duet = require 'minuet.duet'
+            local session = require('minuet').config.duet.session
+
+            duet.action.history_format.unified()
+            helpers.expect_equal(session.edit_history_format, 'unified')
+            duet.action.history_format.synthetic()
+            helpers.expect_equal(session.edit_history_format, 'synthetic')
+            duet.action.history_format.toggle()
+            helpers.expect_equal(session.edit_history_format, 'unified')
+            duet.action.history_format.toggle()
+            helpers.expect_equal(session.edit_history_format, 'synthetic')
+        end,
+    },
 }

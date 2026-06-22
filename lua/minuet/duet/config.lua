@@ -379,6 +379,16 @@ local M = {
         -- Mercury edit_diff_history is an append-only deque: keep the last N
         -- uncoalesced edits, including model predictions the user accepted.
         edit_history_max_entries = 20,
+        -- How each edit_diff_history entry is rendered for the inception_edit
+        -- (Mercury Edit 2) prompt. A/B knob — neither is strictly better:
+        --   'synthetic' (default, original): a compact `@@ -1,N +1,M @@` block
+        --       with blank lines stripped. Aggressive — strongest at propagating
+        --       a repeated edit to the next site, but on a plain deletion the
+        --       model tends to re-insert (un-delete) the line you just removed.
+        --   'unified': a faithful unified diff with real line numbers + context.
+        --       Conservative — far fewer un-deletes, but slightly weaker at
+        --       continuing a multi-site change (more frequent no-ops).
+        edit_history_format = 'synthetic',
     },
     provider_options = {
         openai = make_openai_options(),

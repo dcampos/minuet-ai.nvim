@@ -142,6 +142,37 @@ function M.render_diff_entry(entry, path)
     return table.concat(out, '\n')
 end
 
+--- Render one edit-history entry as a FAITHFUL unified diff: real `--- / +++`
+--- headers and a real `@@ -a,b +c,d @@` hunk with surrounding context, straight
+--- from nvim's unified diff (blanks and positions preserved). This is the
+--- 'unified' edit_history_format — in-distribution for diff-trained models, so
+--- the model reads a removed line as a completed deletion instead of re-inserting
+--- it. Returns nil when nothing changed.
+---@param before string[]
+---@param after string[]
+---@param path string
+---@param ctx_lines? integer
+---@return string?
+function M.render_diff_entry_unified(before, after, path, ctx_lines)
+    ctx_lines = ctx_lines or 8
+    local a = table.concat(before, '\n')
+    local b = table.concat(after, '\n')
+    if a == b then
+        return nil
+    end
+    local unified = get_diff(a, b, ctx_lines)
+    if not unified or unified == '' then
+        return nil
+    end
+    -- nvim's unified diff starts at the `@@` hunk (git adds the file headers);
+    -- prepend them so the block matches the edit_diff_history dialect.
+    local out = { '--- ' .. path, '+++ ' .. path }
+    for _, line in ipairs(clean_diff_lines(unified)) do
+        out[#out + 1] = line
+    end
+    return table.concat(out, '\n')
+end
+
 --- Render a single before -> after edit straight to the `edit_diff_history`
 --- block (convenience over diff_region + render_diff_entry). Returns nil when
 --- nothing changed.
@@ -239,6 +270,10 @@ local function append_transition(state, before, after, path, ctx_lines)
         table.insert(state.diff_entries, {
             original = table.concat(original, '\n'),
             updated = table.concat(updated, '\n'),
+            -- Precompute the faithful unified diff while we still hold the full
+            -- before/after; the entry only keeps the changed region otherwise, so
+            -- the 'unified' edit_history_format reads this back at render time.
+            unified = M.render_diff_entry_unified(before, after, path, ctx_lines),
             start_line = start_line,
             ts_ms = vim.uv.now(),
         })
@@ -294,7 +329,7 @@ function M.edits(bufnr)
 end
 
 ---@param bufnr integer
----@return { original: string, updated: string, start_line: integer, ts_ms: integer }[]
+---@return { original: string, updated: string, unified: string?, start_line: integer, ts_ms: integer }[]
 function M.diff_entries(bufnr)
     return M.get_state(bufnr).diff_entries
 end
@@ -661,9 +696,13 @@ function M.build_inception_edit_turn(bufnr, opts)
     w '<|/current_file_content|>\n'
     w '\n'
 
+    -- A/B knob: 'unified' renders a faithful diff (fewer un-deletes), 'synthetic'
+    -- the compact range block (stronger multi-site propagation). See config.lua.
+    local history_format = session_config().edit_history_format or 'synthetic'
     w '<|edit_diff_history|>\n'
     for _, e in ipairs(entries) do
-        w(M.render_diff_entry(e, path) .. '\n')
+        local block = (history_format == 'unified' and e.unified) or M.render_diff_entry(e, path)
+        w(block .. '\n')
         w '\n'
     end
     w '<|/edit_diff_history|>\n'

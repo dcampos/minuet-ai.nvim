@@ -957,6 +957,16 @@ local function on_edit(info)
     end
 end
 
+---@param fmt 'synthetic'|'unified'
+local function set_history_format(fmt)
+    if fmt ~= 'synthetic' and fmt ~= 'unified' then
+        vim.notify('Minuet duet: unknown edit_history_format ' .. tostring(fmt), vim.log.levels.ERROR)
+        return
+    end
+    scfg().edit_history_format = fmt
+    vim.notify('Minuet duet edit_history_format -> ' .. fmt, vim.log.levels.INFO)
+end
+
 local action = {
     predict = function()
         predict 'manual'
@@ -977,6 +987,26 @@ local action = {
         local bufnr = api.nvim_get_current_buf()
         return preview.is_visible(bufnr, get_state(bufnr))
     end,
+    -- A/B knob for the inception (Mercury Edit 2) edit_diff_history rendering.
+    -- 'synthetic' propagates a repeated edit most aggressively; 'unified' is a
+    -- faithful diff that un-deletes far less often. See config.lua.
+    history_format = {
+        synthetic = function()
+            set_history_format 'synthetic'
+        end,
+        unified = function()
+            set_history_format 'unified'
+        end,
+        toggle = function()
+            set_history_format(scfg().edit_history_format == 'unified' and 'synthetic' or 'unified')
+        end,
+        status = function()
+            vim.notify(
+                'Minuet duet edit_history_format: ' .. tostring(scfg().edit_history_format or 'synthetic'),
+                vim.log.levels.INFO
+            )
+        end,
+    },
 }
 
 M.action = action
