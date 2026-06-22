@@ -20,6 +20,9 @@ local MAX_RECORDS = 2000
 ---@field input integer prompt tokens
 ---@field output integer completion tokens
 ---@field cached integer cached prompt tokens (server-side KV cache hit)
+---@field reported boolean whether the server returned a cache-token field at
+---  all. false = no measurement (Mistral FIM omits it on most responses), which
+---  is kept distinct from a reported zero so it is never counted as a cold miss.
 ---@field elapsed_ms? number
 ---@field disposition? 'snap'|'pinned'|'slid' expected server-cache outcome at
 ---  fire time: 'snap' = reused a warm anchor (snap-back); 'pinned' = fresh
@@ -88,6 +91,7 @@ local function persist(sample)
         model = sample.model,
         input = sample.input,
         cached = sample.cached,
+        reported = sample.reported,
         output = sample.output,
         elapsed_ms = sample.elapsed_ms,
         disposition = sample.disposition,
@@ -99,19 +103,23 @@ end
 --- names different servers use (OpenAI/Mistral nest it under
 --- prompt_tokens_details; DeepSeek reports prompt_cache_hit_tokens).
 ---@param usage table
----@return integer
+---@return integer count cached prompt tokens, 0 when none
+---@return boolean reported whether the server returned a cache field at all.
+---  false means "no data", which must NOT be scored as a cold miss: Mistral's
+---  FIM endpoint omits prompt_tokens_details on the large majority of responses,
+---  so most requests carry no measurement either way.
 local function cached_tokens(usage)
     local details = usage.prompt_tokens_details
     if type(details) == 'table' and type(details.cached_tokens) == 'number' then
-        return details.cached_tokens
+        return details.cached_tokens, true
     end
     if type(usage.prompt_cache_hit_tokens) == 'number' then
-        return usage.prompt_cache_hit_tokens
+        return usage.prompt_cache_hit_tokens, true
     end
     if type(usage.cached_tokens) == 'number' then
-        return usage.cached_tokens
+        return usage.cached_tokens, true
     end
-    return 0
+    return 0, false
 end
 
 --- Map the client's anchor/slide flags to a disposition (our expected server
@@ -138,12 +146,14 @@ function M.record(entry)
             return
         end
         local input = tonumber(usage.prompt_tokens) or 0
+        local cached, reported = cached_tokens(usage)
         local sample = {
             name = entry.name,
             model = entry.model,
             input = input,
             output = tonumber(usage.completion_tokens) or 0,
-            cached = math.min(cached_tokens(usage), input),
+            cached = math.min(cached, input),
+            reported = reported,
             elapsed_ms = entry.elapsed_ms,
             disposition = disposition_of(entry),
             ok = true,
@@ -235,11 +245,14 @@ local BUCKETS = {
 
 -- Per-request cache-hit distribution: for each request, the fraction of its
 -- prompt tokens the server served from KV cache. This is the granularity the
--- single token-weighted headline hides -- stone-cold misses (cold), the benign
--- partial hits where most of the prefix is reused (the mid bands, expected to be
--- the bulk), and literal-exact reuse (100%, near-unreachable with FIM since the
--- suffix is always fresh) all collapse into one mean otherwise. Bands are by
--- cached/input ratio in [0,1].
+-- single token-weighted headline hides -- stone-cold misses (cold, a reported
+-- zero), the benign partial hits where most of the prefix is reused (the mid
+-- bands, expected to be the bulk), and literal-exact reuse (100%, near-unreachable
+-- with FIM since the suffix is always fresh) all collapse into one mean otherwise.
+-- Bands are by cached/input ratio in [0,1]. Only requests the server actually
+-- reported a cache number for are scored here; "no data" responses (the bulk on
+-- Mistral FIM) are counted separately, since scoring them as cold would invent a
+-- miss we never measured.
 local CACHE_BUCKETS = {
     { label = '   cold', test = function(r) return r <= 0 end },
     { label = '  1–25%', test = function(r) return r > 0 and r <= 0.25 end },
@@ -291,6 +304,9 @@ local function render()
     end
 
     local total_in, total_out, total_cached = 0, 0, 0
+    -- Prompt tokens summed over reported requests only -- the honest denominator
+    -- for the headline hit-rate (folding in unreported tokens drags it to ~0).
+    local total_in_reported = 0
     local counts = {}
     local cache_counts = {}
     for _ = 1, #BUCKETS do
@@ -299,16 +315,18 @@ local function render()
     for _ = 1, #CACHE_BUCKETS do
         table.insert(cache_counts, 0)
     end
-    local n_rated, exact_hits = 0, 0
+    -- reported = server returned a cache field (scored into CACHE_BUCKETS);
+    -- unreported = no measurement, tallied on its own and never called cold.
+    local n_reported, n_unreported, exact_hits = 0, 0, 0
     -- Snap-back diagnostics: bucket each request by its fire-time disposition
     -- (our expected server-cache outcome) and count how many actually came back
     -- warm (server returned >0 cached tokens). This reveals whether the prefix-
     -- pin snap-backs are really being reused, and how often one we expected to
     -- reuse came back a basically-full miss (server eviction).
     local disp = {
-        snap = { total = 0, warm = 0 },
-        pinned = { total = 0, warm = 0 },
-        slid = { total = 0, warm = 0 },
+        snap = { total = 0, reported = 0, warm = 0 },
+        pinned = { total = 0, reported = 0, warm = 0 },
+        slid = { total = 0, reported = 0, warm = 0 },
     }
     local latencies = {}
     for _, s in ipairs(samples) do
@@ -322,23 +340,31 @@ local function render()
             end
         end
         if s.input > 0 then
-            local ratio = s.cached / s.input
-            n_rated = n_rated + 1
-            if ratio >= 1 then
-                exact_hits = exact_hits + 1
-            end
-            for b, bucket in ipairs(CACHE_BUCKETS) do
-                if bucket.test(ratio) then
-                    cache_counts[b] = cache_counts[b] + 1
-                    break
+            if s.reported then
+                total_in_reported = total_in_reported + s.input
+                local ratio = s.cached / s.input
+                n_reported = n_reported + 1
+                if ratio >= 1 then
+                    exact_hits = exact_hits + 1
                 end
+                for b, bucket in ipairs(CACHE_BUCKETS) do
+                    if bucket.test(ratio) then
+                        cache_counts[b] = cache_counts[b] + 1
+                        break
+                    end
+                end
+            else
+                n_unreported = n_unreported + 1
             end
         end
         local d = s.disposition and disp[s.disposition]
         if d then
             d.total = d.total + 1
-            if s.cached > 0 then
-                d.warm = d.warm + 1
+            if s.reported then
+                d.reported = d.reported + 1
+                if s.cached > 0 then
+                    d.warm = d.warm + 1
+                end
             end
         end
         if s.elapsed_ms then
@@ -347,7 +373,10 @@ local function render()
     end
     table.sort(latencies)
 
-    local hit_rate = total_in > 0 and (total_cached / total_in) or 0
+    -- Token-weighted over REPORTED tokens only: unreported requests carry no
+    -- measurement, so including their tokens would drag the rate toward zero and
+    -- misrepresent the cache (the old, misleading behavior).
+    local hit_rate = total_in_reported > 0 and (total_cached / total_in_reported) or 0
     local max_bucket = 0
     for _, c in ipairs(counts) do
         max_bucket = math.max(max_bucket, c)
@@ -369,23 +398,49 @@ local function render()
     add(string.format('   input tokens   %s   (cached %s)', commas(total_in), commas(total_cached)))
     add(string.format('   output tokens  %s', commas(total_out)))
     add('')
-    -- Protagonist: token-weighted share of all prompt tokens served from cache.
-    add(string.format('   prompt tokens from cache  %s  %d%%', bar(hit_rate, 1, 24), math.floor(hit_rate * 100 + 0.5)))
+    -- Protagonist: token-weighted share of cache hits, over the tokens the server
+    -- actually reported on. When the server stays mostly silent (Mistral FIM omits
+    -- cache fields on most responses) we say how thin the data is rather than
+    -- printing a confident 0%.
+    if n_reported > 0 then
+        add(string.format(
+            '   prompt tokens from cache  %s  %d%%',
+            bar(hit_rate, 1, 24),
+            math.floor(hit_rate * 100 + 0.5)
+        ))
+        if n_unreported > 0 then
+            add(string.format(
+                '   reported cache for %s of %s requests',
+                commas(n_reported),
+                commas(n_reported + n_unreported)
+            ))
+        end
+    else
+        add('   prompt tokens from cache  no server data')
+        add(string.format('   server omitted cache fields on all %s requests', commas(n_unreported)))
+    end
     add('')
-    add('   cache hit / request')
+    add(string.format('   cache hit / request  ·  %s reported', commas(n_reported)))
     for b, bucket in ipairs(CACHE_BUCKETS) do
         add(string.format('   %s  %s %s', bucket.label, bar(cache_counts[b], max_cache, 16), commas(cache_counts[b])))
     end
-    if n_rated > 0 then
+    if n_unreported > 0 then
+        -- Not a cold miss: the server returned no cache field, so there is no
+        -- measurement. Kept distinct from `cold` (a reported zero) on purpose.
+        add(string.format('   no server data: %s req', commas(n_unreported)))
+    end
+    if n_reported > 0 then
         -- Secondary, de-emphasized: literal-exact reuse. Near-zero is expected
         -- with FIM (the suffix is always fresh), so it is not the protagonist.
-        local exact_pct = math.floor(exact_hits / n_rated * 100 + 0.5)
+        local exact_pct = math.floor(exact_hits / n_reported * 100 + 0.5)
         add(string.format('   exact 100%% reuse: %s req (%d%%)', commas(exact_hits), exact_pct))
     end
 
-    -- Snap-back diagnostics. For each disposition, the bar is the share that came
-    -- back warm; snap-back also calls out the cold count (expected reuse, server
-    -- missed) and slid is the expected-miss baseline we should see stay cold.
+    -- Snap-back diagnostics. For each disposition the bar is the warm share among
+    -- requests the server actually reported a cache number for; "no data"
+    -- responses are shown separately, never folded into warm or cold. snap-back
+    -- also calls out reported-cold (expected reuse the server missed); slid is the
+    -- expected-miss baseline we want to see stay cold.
     local disp_total = disp.snap.total + disp.pinned.total + disp.slid.total
     if disp_total > 0 then
         add('')
@@ -398,14 +453,18 @@ local function render()
         for _, row in ipairs(rows) do
             local d = disp[row.key]
             if d.total > 0 then
-                local rate = d.warm / d.total
+                local rate = d.reported > 0 and (d.warm / d.reported) or 0
+                local nodata = d.total - d.reported
                 local detail
-                if row.key == 'snap' then
-                    detail = string.format('%s fired · %s cold', commas(d.total), commas(d.total - d.warm))
-                elseif row.key == 'slid' then
+                if row.key == 'slid' then
                     detail = string.format('%s · expected miss', commas(d.total))
                 else
-                    detail = commas(d.total)
+                    detail = string.format(
+                        '%s fired · %s cold · %s no data',
+                        commas(d.total),
+                        commas(d.reported - d.warm),
+                        commas(nodata)
+                    )
                 end
                 local pct = math.floor(rate * 100 + 0.5)
                 add(string.format('   %s %s %3d%%  %s', row.label, bar(rate, 1, 10), pct, detail))
@@ -464,7 +523,13 @@ end
 local function highlight_line(buf, line_idx, line)
     if line:find('✨', 1, true) then
         vim.api.nvim_buf_set_extmark(buf, HL_NS, line_idx, 0, { end_col = #line, hl_group = 'MinuetStatsTitle' })
-    elseif line:find('☆', 1, true) or line:find('exact 100', 1, true) then
+    elseif
+        line:find('☆', 1, true)
+        or line:find('exact 100', 1, true)
+        or line:find('no server data:', 1, true)
+        or line:find('reported cache for', 1, true)
+        or line:find('omitted cache fields', 1, true)
+    then
         vim.api.nvim_buf_set_extmark(buf, HL_NS, line_idx, 0, { end_col = #line, hl_group = 'MinuetStatsDim' })
     end
 

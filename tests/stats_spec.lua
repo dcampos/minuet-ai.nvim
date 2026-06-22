@@ -94,6 +94,32 @@ return {
         end,
     },
     {
+        name = 'stats counts unreported requests as no-data, never as cold',
+        run = function()
+            stats.reset()
+            rec(1000, 750, 5) -- server reported a real cache hit (75%)
+            -- Two responses with a usage block but NO cache field at all: this is
+            -- "no data", which must not be scored as a cold miss.
+            local nodata = { prompt_tokens = 1000, completion_tokens = 5 }
+            rec(nil, nil, 5, nodata)
+            rec(nil, nil, 5, nodata)
+
+            local text, win = dashboard()
+            local bars = '[█▏▎▍▌▋▊▉░]+'
+            -- Headline is weighted over reported tokens only: 750/1000 = 75%, not
+            -- diluted to 750/3000 = 25% by the two unreported requests.
+            helpers.expect_match(text, 'prompt tokens from cache%s+' .. bars .. '%s+75%%')
+            helpers.expect_match(text, 'reported cache for 1 of 3 requests')
+            -- The reported request is a hit, so cold stays empty; the two
+            -- unreported land in their own no-data tally.
+            helpers.expect_match(text, 'cold%s+' .. bars .. '%s+0')
+            helpers.expect_match(text, 'no server data: 2 req')
+
+            vim.api.nvim_win_close(win, true)
+            stats.reset()
+        end,
+    },
+    {
         name = 'stats classifies snap-back / pinned / slid and counts server-warm reuse',
         run = function()
             stats.reset()
