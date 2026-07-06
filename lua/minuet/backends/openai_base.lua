@@ -272,8 +272,31 @@ function M.complete_openai_fim_base(options, get_text_fn, context, callback, cfg
         local data_file = data_files[idx]
         local args = utils.make_curl_args(transformed_data.end_point, transformed_data.headers, data_file, config)
 
+        -- Stream partials from the FIRST-SENT request only: its settled result
+        -- lands in slot 1, the same completion the display ranks first when the
+        -- batch finishes, so a partial painted from it never flips to a
+        -- different completion as the remaining requests settle.
+        local on_stdout
+        local on_partial = context.opts and context.opts.on_stream_partial
+        if idx == 1 and options.stream and on_partial then
+            local feed = utils.make_sse_accumulator(get_text_fn)
+            on_stdout = function(chunk)
+                local text = feed(chunk)
+                if text == nil then
+                    return
+                end
+                if options.strip_spurious_leading_newline then
+                    text = utils.strip_codestral_spurious_newline(text, data.prompt, data.suffix)
+                end
+                if text and #text > 0 then
+                    on_partial(text)
+                end
+            end
+        end
+
         local started = log.start()
         local new_job = common.start_job(config.curl_cmd, args, {
+            on_stdout = on_stdout,
             ---@param out vim.SystemCompleted
             on_exit = function(_, out)
                 local elapsed_ms = (vim.uv.hrtime() - started) / 1e6

@@ -1880,4 +1880,198 @@ return {
             helpers.delete_buffer(bufnr)
         end,
     },
+    {
+        -- max_display_lines = 1: a multi-line completion renders as one line of
+        -- ghost text with a +N hidden-tail marker; bare accepts take only the
+        -- visible portion and walk the completion line by line.
+        name = 'virtualtext max_display_lines renders one line and accepts piecewise',
+        run = function()
+            helpers.setup_root_config {
+                provider = 'test',
+                debounce = 0,
+                throttle = 0,
+                n_completions = 1,
+                virtualtext = {
+                    debounce = 0,
+                    throttle = 0,
+                    max_retries = 0,
+                    max_display_lines = 1,
+                },
+                provider_options = {
+                    test = { model = 'fixture-model', optional = {} },
+                },
+            }
+
+            package.loaded['minuet.backends.test'] = {
+                complete = function(_, callback)
+                    callback { '1\ny = 2\nz = 3' }
+                end,
+            }
+
+            local virtualtext = helpers.reload 'minuet.virtualtext'
+            virtualtext.setup()
+
+            local original_ve = vim.o.virtualedit
+            vim.o.virtualedit = 'onemore'
+            local bufnr = helpers.create_buffer({ 'x = ' }, { 1, 4 })
+            local original_mode = vim.fn.mode
+            vim.fn.mode = function()
+                return 'i'
+            end
+
+            virtualtext.action.fire()
+            helpers.expect_equal(
+                get_suggestion_text(bufnr, virtualtext.ns_id),
+                '1 (+2)',
+                'only the first line renders, with the hidden tail counted'
+            )
+
+            virtualtext.action.accept()
+            helpers.expect_equal(vim.api.nvim_buf_get_lines(bufnr, 0, -1, false), { 'x = 1' })
+            helpers.expect_equal(
+                get_suggestion_text(bufnr, virtualtext.ns_id),
+                '\ny = 2 (+1)',
+                'the remainder shows the next content line, one virt_line below'
+            )
+
+            virtualtext.action.accept()
+            helpers.expect_equal(vim.api.nvim_buf_get_lines(bufnr, 0, -1, false), { 'x = 1', 'y = 2' })
+            helpers.expect_equal(
+                get_suggestion_text(bufnr, virtualtext.ns_id),
+                '\nz = 3',
+                'nothing is hidden once a single content line remains'
+            )
+
+            virtualtext.action.accept()
+            helpers.expect_equal(vim.api.nvim_buf_get_lines(bufnr, 0, -1, false), { 'x = 1', 'y = 2', 'z = 3' })
+            helpers.expect_falsy(virtualtext.action.is_visible(), 'the suggestion is consumed')
+
+            virtualtext.action.dismiss()
+            vim.fn.mode = original_mode
+            vim.o.virtualedit = original_ve
+            helpers.delete_buffer(bufnr)
+        end,
+    },
+    {
+        -- A manual multi-line keymap lifts the cap for its own request family
+        -- (virtualtext = { max_display_lines = false }), keeping the classic
+        -- full multi-line ghost text.
+        name = 'virtualtext max_display_lines override lifts the cap for a manual trigger',
+        run = function()
+            helpers.setup_root_config {
+                provider = 'test',
+                debounce = 0,
+                throttle = 0,
+                n_completions = 1,
+                virtualtext = {
+                    debounce = 0,
+                    throttle = 0,
+                    max_retries = 0,
+                    max_display_lines = 1,
+                },
+                provider_options = {
+                    test = { model = 'fixture-model', optional = {} },
+                },
+            }
+
+            package.loaded['minuet.backends.test'] = {
+                complete = function(_, callback)
+                    callback { '1\ny = 2\nz = 3' }
+                end,
+            }
+
+            local virtualtext = helpers.reload 'minuet.virtualtext'
+            virtualtext.setup()
+
+            local original_ve = vim.o.virtualedit
+            vim.o.virtualedit = 'onemore'
+            local bufnr = helpers.create_buffer({ 'x = ' }, { 1, 4 })
+            local original_mode = vim.fn.mode
+            vim.fn.mode = function()
+                return 'i'
+            end
+
+            virtualtext.action.fire { virtualtext = { max_display_lines = false } }
+            helpers.expect_equal(
+                get_suggestion_text(bufnr, virtualtext.ns_id),
+                '1\ny = 2\nz = 3',
+                'the override renders the whole completion'
+            )
+
+            virtualtext.action.dismiss()
+            vim.fn.mode = original_mode
+            vim.o.virtualedit = original_ve
+            helpers.delete_buffer(bufnr)
+        end,
+    },
+    {
+        -- Streamed first-line early paint: with a display cap, the visible
+        -- portion is final as soon as the stream moves past it, so the ghost
+        -- text paints from the partial without waiting for the request to
+        -- settle; the settled completion then replaces it seamlessly.
+        name = 'virtualtext paints the first line from a stream partial before the request settles',
+        run = function()
+            helpers.setup_root_config {
+                provider = 'test',
+                debounce = 0,
+                throttle = 0,
+                n_completions = 1,
+                virtualtext = {
+                    debounce = 0,
+                    throttle = 0,
+                    max_retries = 0,
+                    max_display_lines = 1,
+                },
+                provider_options = {
+                    test = { model = 'fixture-model', optional = {} },
+                },
+            }
+
+            local on_stream_partial
+            local pending_callback
+            package.loaded['minuet.backends.test'] = {
+                complete = function(context, callback)
+                    on_stream_partial = context.opts.on_stream_partial
+                    pending_callback = callback
+                end,
+            }
+
+            local virtualtext = helpers.reload 'minuet.virtualtext'
+            virtualtext.setup()
+
+            local original_ve = vim.o.virtualedit
+            vim.o.virtualedit = 'onemore'
+            local bufnr = helpers.create_buffer({ 'x = ' }, { 1, 4 })
+            local original_mode = vim.fn.mode
+            vim.fn.mode = function()
+                return 'i'
+            end
+
+            virtualtext.action.fire()
+            helpers.expect_truthy(on_stream_partial, 'a capped trigger passes the partial hook to the backend')
+            helpers.expect_falsy(virtualtext.action.is_visible(), 'nothing painted before the first line settles')
+
+            -- Mid-stream, first line not complete yet: no paint.
+            on_stream_partial '1'
+            helpers.expect_falsy(virtualtext.action.is_visible(), 'an incomplete visible portion stays unpainted')
+
+            -- The stream moved past the first line: paint it.
+            on_stream_partial '1\ny = '
+            helpers.expect_equal(get_suggestion_text(bufnr, virtualtext.ns_id), '1 (+1)')
+
+            -- Later partials do not repaint over the shown line.
+            on_stream_partial '1\ny = 2\nz'
+            helpers.expect_equal(get_suggestion_text(bufnr, virtualtext.ns_id), '1 (+1)')
+
+            -- The settled result replaces the partial: same visible line,
+            -- longer hidden tail.
+            pending_callback({ '1\ny = 2\nz = 3' }, true)
+            helpers.expect_equal(get_suggestion_text(bufnr, virtualtext.ns_id), '1 (+2)')
+
+            virtualtext.action.dismiss()
+            vim.fn.mode = original_mode
+            vim.o.virtualedit = original_ve
+            helpers.delete_buffer(bufnr)
+        end,
+    },
 }

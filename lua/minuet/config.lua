@@ -253,6 +253,21 @@ local M = {
         -- Whether show virtual text suggestion when the completion menu
         -- (nvim-cmp or blink-cmp) is visible.
         show_on_completion_menu = false,
+        -- Render at most this many content lines (lines with non-whitespace) of
+        -- the active suggestion as ghost text; blank lines before the cut are
+        -- kept, and a `+N` marker in the annotation counts the hidden tail
+        -- lines. Rendering only: generation is unaffected, the full multi-line
+        -- completion stays cached and is consumed piecewise -- a bare accept
+        -- takes just the visible portion, and the hidden tail re-surfaces as
+        -- the next line(s) while the cursor moves into it. With a cap active,
+        -- a streamed completion also paints as soon as its visible portion is
+        -- final in the stream (~the first newline) instead of at request exit,
+        -- so dropping a `stop = '\n'` in favor of multi-line generation does
+        -- not cost first-paint latency. Per-trigger overridable; a manual
+        -- multi-line keymap lifts the cap for its own request family with
+        --   action.next { virtualtext = { max_display_lines = false } }
+        -- nil/false renders everything (default).
+        max_display_lines = nil,
         -- Maximum number of response pool entries kept per buffer. The pool is
         -- the local cache of past completions; a larger pool lets us recognise
         -- more previously-seen buffer states (so a returning cursor re-shows a

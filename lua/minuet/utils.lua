@@ -976,6 +976,46 @@ function M.stream_decode(response, data_file, provider, get_text_fn)
     return result_str
 end
 
+--- Incremental counterpart of stream_decode for consuming a streamed response
+--- while the request is still running. Returns a feed function: feed(chunk)
+--- takes raw stdout bytes as they arrive and returns the full accumulated
+--- content text when the chunk completed at least one new content-bearing SSE
+--- line, or nil otherwise. Only complete lines are decoded; a partial trailing
+--- line stays buffered until its newline arrives (the final line is also
+--- decoded by the post-exit stream_decode pass, which remains authoritative).
+---@param get_text_fn fun(json: table): string?
+---@return fun(chunk: string): string?
+function M.make_sse_accumulator(get_text_fn)
+    local buffered = ''
+    local parts = {}
+    return function(chunk)
+        buffered = buffered .. chunk
+        local grew = false
+        while true do
+            local nl = buffered:find('\n', 1, true)
+            if not nl then
+                break
+            end
+            local line = buffered:sub(1, nl - 1)
+            buffered = buffered:sub(nl + 1)
+
+            line = line:gsub('^data:', '')
+            local success, json = pcall(vim.json.decode, line)
+            if success then
+                local ok, text = pcall(get_text_fn, json)
+                if ok and type(text) == 'string' and text ~= '' then
+                    table.insert(parts, text)
+                    grew = true
+                end
+            end
+        end
+        if grew then
+            return table.concat(parts)
+        end
+        return nil
+    end
+end
+
 M.add_single_line_entry = function(list)
     local newlist = {}
 

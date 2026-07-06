@@ -321,6 +321,30 @@ local function pool_suggestions(ctx, params, cur_before, cur_after, cur_incomple
     return results, n_fresh
 end
 
+--- Index of the last display line to keep when at most `max_lines` content
+--- lines (lines with non-whitespace) may be shown, or nil when nothing needs
+--- hiding. Blank lines before the cut are kept: after a line-accept the
+--- remainder starts with '\n', and the one line worth showing is the next
+--- content line, a single virt_line below the cursor.
+---@param display_lines string[] suggestion split on '\n'
+---@param max_lines integer? nil disables truncation
+---@return integer? cut last display-line index to keep, nil when nothing is hidden
+local function display_cut(display_lines, max_lines)
+    if not max_lines or max_lines <= 0 or #display_lines <= max_lines then
+        return nil
+    end
+    local content = 0
+    for i, line in ipairs(display_lines) do
+        if line:find '%S' then
+            content = content + 1
+            if content >= max_lines then
+                return i < #display_lines and i or nil
+            end
+        end
+    end
+    return nil
+end
+
 local MAX_LOCKS = 8
 
 --- The lock associated with the current buffer state, if any, plus its untyped
@@ -457,6 +481,7 @@ end
 ---@field cur_before? string before-cursor text of the most recent derive
 ---@field cur_after? string after-cursor text of the most recent derive
 ---@field cur_incomplete_before? boolean whether cur_before was left-truncated
+---@field display_max_lines? integer render at most this many content lines of the active suggestion (nil = all)
 ---@field fetch_state_before? string before-cursor text where the current top-up budget started
 ---@field fetch_params? table params of the current top-up budget's state
 ---@field fetched_this_state? boolean whether a non-retry request already fired at the current top-up state
@@ -548,17 +573,32 @@ local function update_preview(ctx)
         return
     end
 
-    local annot = ''
+    -- Display-side line cap: the full (multi-line) suggestion stays intact for
+    -- the cache and the accept actions; only the rendering is cut, so the ghost
+    -- text never displaces more than the configured number of lines below.
+    local hidden_lines = 0
+    local cut = display_cut(display_lines, ctx.display_max_lines)
+    if cut then
+        hidden_lines = #display_lines - cut
+        display_lines = vim.list_slice(display_lines, 1, cut)
+    end
 
     -- While a cycle-past-the-last fetch is in flight, show a loading indicator
     -- inside the counter -- e.g. (2/2 ⋯) -- even for a lone suggestion, so the
-    -- user knows a fresh, distinct completion is being fetched.
+    -- user knows a fresh, distinct completion is being fetched. A display cap
+    -- adds the number of hidden tail lines, e.g. (1/2 +3), so the user knows
+    -- the completion keeps going past what is shown.
+    local annot_parts = {}
     local n_sug = ctx.suggestions and #ctx.suggestions or 0
     if ctx.distinct_active and not ctx.distinct_silent and n_sug >= 1 then
-        annot = '(' .. ctx.choice .. '/' .. n_sug .. ' ⋯)'
+        table.insert(annot_parts, ctx.choice .. '/' .. n_sug .. ' ⋯')
     elseif n_sug > 1 then
-        annot = '(' .. ctx.choice .. '/' .. n_sug .. ')'
+        table.insert(annot_parts, ctx.choice .. '/' .. n_sug)
     end
+    if hidden_lines > 0 then
+        table.insert(annot_parts, '+' .. hidden_lines)
+    end
+    local annot = #annot_parts > 0 and ('(' .. table.concat(annot_parts, ' ') .. ')') or ''
 
     local cursor_col = vim.fn.col '.'
     local cursor_line = vim.fn.line '.'
@@ -575,8 +615,10 @@ local function update_preview(ctx)
             extmark.virt_lines[i - 1] = { { display_lines[i], 'MinuetVirtualText' } }
         end
 
-        local last_line = #display_lines - 1
-        extmark.virt_lines[last_line][1][1] = extmark.virt_lines[last_line][1][1] .. ' ' .. annot
+        if #annot > 0 then
+            local last_line = #display_lines - 1
+            extmark.virt_lines[last_line][1][1] = extmark.virt_lines[last_line][1][1] .. ' ' .. annot
+        end
     elseif #annot > 0 then
         extmark.virt_text[1][1] = extmark.virt_text[1][1] .. ' ' .. annot
     end
@@ -771,6 +813,14 @@ local function trigger(bufnr, overrides, is_retry, is_manual)
     -- Remember which params were active so on_cursor_moved_i can match them.
     ctx.last_trigger_params = params
 
+    -- Display-side line cap traveling with this trigger family, resolved from
+    -- the effective (post-override) config so a manual multi-line keymap can
+    -- lift it for its own request (virtualtext = { max_display_lines = false })
+    -- while auto/default triggers keep it. Rendering only: the full completion
+    -- is cached and accepted as usual.
+    local max_display_lines = (cfg.virtualtext or {}).max_display_lines
+    ctx.display_max_lines = type(max_display_lines) == 'number' and max_display_lines > 0 and max_display_lines or nil
+
     -- Show any already-cached suggestions immediately while the request is in
     -- flight (never block display on the request, even when a fresher / more
     -- context-rich response could still arrive).
@@ -850,6 +900,55 @@ local function trigger(bufnr, overrides, is_retry, is_manual)
     -- A hard cleanup bumps the generation to invalidate them all at once.
     ctx.request_generation = ctx.request_generation or 0
     local request_generation = ctx.request_generation
+
+    -- First-line early paint. With a display cap active, the visible portion of
+    -- a streamed completion is final as soon as the stream moves past it (~the
+    -- first newline) -- several hundred ms before the full generation finishes
+    -- (codestral, 64 tokens: first line ~575ms vs stream done ~955ms, see
+    -- scripts/probe_codestral_first_line_stream.py). Paint it then instead of
+    -- at request exit. The partial never enters the cache; when the request
+    -- settles, the full completion replaces it seamlessly (same visible line,
+    -- longer hidden tail). Uncapped triggers (e.g. a manual multi-line keymap)
+    -- get no hook: their visible portion is only final at the end of the
+    -- stream, which is the paint-on-exit behavior they already have.
+    if ctx.display_max_lines then
+        local display_max_lines = ctx.display_max_lines
+        context.opts.on_stream_partial = function(text)
+            if api.nvim_get_current_buf() ~= bufnr or ctx.request_generation ~= request_generation then
+                return
+            end
+            -- Never paint over an existing view: cached suggestions already
+            -- shown are complete and cyclable, and a distinct fetch holds the
+            -- user's current view until its result lands.
+            if ctx.distinct_active or (ctx.suggestions and #ctx.suggestions > 0) then
+                return
+            end
+            text = truncate_at_stop_tokens(text, params.stop_tokens)
+            -- The user may have typed while the stream is in flight; apply the
+            -- same content-compatibility rules as the cache pool, on one item.
+            local ctx_now = vt_get_context(utils.make_cmp_context(), cfg)
+            if not suffix_compatible(cur_after, ctx_now.lines_after) then
+                return
+            end
+            local typed_since = prefix_typed_since(cur_before, ctx_now.lines_before, ctx_now.opts.is_incomplete_before)
+            if typed_since == nil or typed_since >= #text then
+                return
+            end
+            if text:sub(1, typed_since) ~= ctx_now.lines_before:sub(#ctx_now.lines_before - typed_since + 1) then
+                return
+            end
+            local remainder = text:sub(typed_since + 1)
+            -- Paint only once the visible portion is final, i.e. the stream has
+            -- produced at least one display line beyond the cut.
+            if not display_cut(vim.split(remainder, '\n', { plain = true }), display_max_lines) then
+                return
+            end
+            ctx.suggestions = { remainder }
+            ctx.choice = 1
+            ctx.shown_choices = ctx.shown_choices or {}
+            update_preview(ctx)
+        end
+    end
 
     provider.complete(context, function(data, done)
         if api.nvim_get_current_buf() ~= bufnr then
@@ -1340,7 +1439,11 @@ local function find_nth_word_end(s, n)
     return pos
 end
 
----@param n_lines? integer Number of lines to accept. If both params are nil, accepts all.
+---@param n_lines? integer Number of lines to accept. If both params are nil,
+---accepts everything shown: the whole suggestion, or just the visible portion
+---when a display cap is hiding tail lines (what you see is what you accept --
+---the remainder stays the active suggestion, so repeated accepts walk the
+---completion line by line).
 ---@param n_words? integer Number of word units to accept. Takes precedence over n_lines.
 ---Accepts the current suggestion by inserting it at the cursor position.
 ---After insertion, moves the cursor to the end of the inserted text.
@@ -1372,6 +1475,13 @@ function action.accept(n_lines, n_words)
         n_lines = math.min(n_lines, #lines)
         local picked = vim.list_slice(lines, 1, n_lines)
         accept_n_chars(#table.concat(picked, '\n'))
+        return
+    end
+
+    local lines = vim.split(suggestion, '\n', { plain = true })
+    local cut = display_cut(lines, ctx.display_max_lines)
+    if cut then
+        accept_n_chars(#table.concat(vim.list_slice(lines, 1, cut), '\n'))
         return
     end
 

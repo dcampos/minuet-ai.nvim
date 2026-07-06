@@ -45,6 +45,7 @@ end
 ---@class minuet.JobHandlers
 ---@field on_exit fun(job: vim.SystemObj, result: vim.SystemCompleted)
 ---@field on_spawn_error? fun()
+---@field on_stdout? fun(chunk: string) incremental stdout, delivered on the main loop; result.stdout still carries the full output on exit
 
 ---@param command string
 ---@param args string[]
@@ -56,13 +57,39 @@ function M.start_job(command, args, handlers)
 
     ---@type vim.SystemObj?
     local job
+
+    local opts = { text = true }
+    local stdout_chunks
+    if handlers.on_stdout then
+        -- A custom stdout handler stops vim.system from collecting the output
+        -- itself, so accumulate the chunks and hand the assembled result to
+        -- on_exit. vim.schedule preserves delivery order, and the exit callback
+        -- is queued after the last chunk, so on_exit still sees everything.
+        stdout_chunks = {}
+        opts.stdout = function(err, chunk)
+            if err or chunk == nil then
+                return
+            end
+            table.insert(stdout_chunks, chunk)
+            vim.schedule(function()
+                handlers.on_stdout(chunk)
+            end)
+        end
+    end
+
     local ok, result = pcall(
         vim.system,
         cmd,
-        { text = true },
+        opts,
         vim.schedule_wrap(function(out)
             if not job then
                 return
+            end
+
+            if stdout_chunks then
+                -- The text=true CRLF translation only applies to collected
+                -- output; mirror it for the assembled stream.
+                out.stdout = table.concat(stdout_chunks):gsub('\r\n', '\n')
             end
 
             M.remove_job(job)
