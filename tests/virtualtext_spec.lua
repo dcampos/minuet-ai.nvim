@@ -1922,15 +1922,15 @@ return {
             virtualtext.action.fire()
             helpers.expect_equal(
                 get_suggestion_text(bufnr, virtualtext.ns_id),
-                '1 (+2)',
-                'only the first line renders, with the hidden tail counted'
+                '1',
+                'only the first line renders'
             )
 
             virtualtext.action.accept()
             helpers.expect_equal(vim.api.nvim_buf_get_lines(bufnr, 0, -1, false), { 'x = 1' })
             helpers.expect_equal(
                 get_suggestion_text(bufnr, virtualtext.ns_id),
-                '\ny = 2 (+1)',
+                '\ny = 2',
                 'the remainder shows the next content line, one virt_line below'
             )
 
@@ -2057,16 +2057,20 @@ return {
 
             -- The stream moved past the first line: paint it.
             on_stream_partial '1\ny = '
-            helpers.expect_equal(get_suggestion_text(bufnr, virtualtext.ns_id), '1 (+1)')
+            helpers.expect_equal(get_suggestion_text(bufnr, virtualtext.ns_id), '1')
 
             -- Later partials do not repaint over the shown line.
             on_stream_partial '1\ny = 2\nz'
-            helpers.expect_equal(get_suggestion_text(bufnr, virtualtext.ns_id), '1 (+1)')
+            helpers.expect_equal(get_suggestion_text(bufnr, virtualtext.ns_id), '1')
 
             -- The settled result replaces the partial: same visible line,
-            -- longer hidden tail.
+            -- longer hidden tail. Accepting proves the swap -- the stored
+            -- partial ('1\ny = ') could not serve a complete second line.
             pending_callback({ '1\ny = 2\nz = 3' }, true)
-            helpers.expect_equal(get_suggestion_text(bufnr, virtualtext.ns_id), '1 (+2)')
+            helpers.expect_equal(get_suggestion_text(bufnr, virtualtext.ns_id), '1')
+            virtualtext.action.accept()
+            helpers.expect_equal(vim.api.nvim_buf_get_lines(bufnr, 0, -1, false), { 'x = 1' })
+            helpers.expect_equal(get_suggestion_text(bufnr, virtualtext.ns_id), '\ny = 2')
 
             virtualtext.action.dismiss()
             vim.fn.mode = original_mode

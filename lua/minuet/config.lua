@@ -255,8 +255,7 @@ local M = {
         show_on_completion_menu = false,
         -- Render at most this many content lines (lines with non-whitespace) of
         -- the active suggestion as ghost text; blank lines before the cut are
-        -- kept, and a `+N` marker in the annotation counts the hidden tail
-        -- lines. Rendering only: generation is unaffected, the full multi-line
+        -- kept. Rendering only: generation is unaffected, the full multi-line
         -- completion stays cached and is consumed piecewise -- a bare accept
         -- takes just the visible portion, and the hidden tail re-surfaces as
         -- the next line(s) while the cursor moves into it. With a cap active,

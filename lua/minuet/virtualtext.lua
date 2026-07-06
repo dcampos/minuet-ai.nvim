@@ -581,29 +581,22 @@ local function update_preview(ctx)
     -- Display-side line cap: the full (multi-line) suggestion stays intact for
     -- the cache and the accept actions; only the rendering is cut, so the ghost
     -- text never displaces more than the configured number of lines below.
-    local hidden_lines = 0
     local cut = display_cut(display_lines, ctx.display_max_lines)
     if cut then
-        hidden_lines = #display_lines - cut
         display_lines = vim.list_slice(display_lines, 1, cut)
     end
 
+    local annot = ''
+
     -- While a cycle-past-the-last fetch is in flight, show a loading indicator
     -- inside the counter -- e.g. (2/2 ⋯) -- even for a lone suggestion, so the
-    -- user knows a fresh, distinct completion is being fetched. A display cap
-    -- adds the number of hidden tail lines, e.g. (1/2 +3), so the user knows
-    -- the completion keeps going past what is shown.
-    local annot_parts = {}
+    -- user knows a fresh, distinct completion is being fetched.
     local n_sug = ctx.suggestions and #ctx.suggestions or 0
     if ctx.distinct_active and not ctx.distinct_silent and n_sug >= 1 then
-        table.insert(annot_parts, ctx.choice .. '/' .. n_sug .. ' ⋯')
+        annot = '(' .. ctx.choice .. '/' .. n_sug .. ' ⋯)'
     elseif n_sug > 1 then
-        table.insert(annot_parts, ctx.choice .. '/' .. n_sug)
+        annot = '(' .. ctx.choice .. '/' .. n_sug .. ')'
     end
-    if hidden_lines > 0 then
-        table.insert(annot_parts, '+' .. hidden_lines)
-    end
-    local annot = #annot_parts > 0 and ('(' .. table.concat(annot_parts, ' ') .. ')') or ''
 
     local cursor_col = vim.fn.col '.'
     local cursor_line = vim.fn.line '.'
