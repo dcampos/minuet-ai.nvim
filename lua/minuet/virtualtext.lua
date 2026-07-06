@@ -20,6 +20,11 @@ local internal = {
     is_on_throttle = false,
 }
 
+-- Running tally of FIM prefix-pin slides (re-anchors that actually shed the
+-- warm leading tokens, as opposed to an anchored reuse or a naturally-pinned
+-- window). Printed on each fired request as a behavior watch.
+local prefix_slide_count = 0
+
 ---@return 'off' | 'unintrusive' | 'full'
 local function auto_trigger_mode()
     return vim.b.minuet_virtual_text_auto_trigger_mode or 'off'
@@ -891,6 +896,21 @@ local function trigger(bufnr, overrides, is_retry, is_manual)
         while #ctx.anchors > max_anchors do
             table.remove(ctx.anchors, 1)
         end
+    end
+
+    -- Prefix-pin slide watch. Each fired request is either an anchored reuse
+    -- (pin held), a re-anchor that naturally pins (prefix at buffer top, no
+    -- loss), or a slide (re-anchor that sheds the warm leading tokens). Count
+    -- the slides and print the running tally each request so the pin's behavior
+    -- is easy to keep an eye on. Skip retries: they re-fire at the same state
+    -- and would double-count one keystroke's slide.
+    if not is_retry then
+        local disp = context.opts.anchored and 'anchored'
+            or (context.opts.would_slide and 'slid' or 'pinned')
+        if disp == 'slid' then
+            prefix_slide_count = prefix_slide_count + 1
+        end
+        print(string.format('[minuet] prefix pin slides: %d (this: %s)', prefix_slide_count, disp))
     end
 
     local provider = require('minuet.backends.' .. cfg.provider)
