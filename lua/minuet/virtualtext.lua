@@ -440,7 +440,11 @@ local function derive_suggestions(ctx, params, cur_before, cur_after, cur_incomp
 
     local choice = 1
     local _, pinned = compatible_lock(ctx, params, cur_before, cur_after, cur_incomplete_before)
-    if pinned ~= nil then
+    -- A lock whose completion the user has fully consumed (accepted or typed
+    -- out -- remainder empty) is spent: it must not pin the state to an empty
+    -- ghost text. Fall through to the natural ranking instead, whose set_lock
+    -- re-locks this state to the next result, replacing the spent lock.
+    if pinned ~= nil and #pinned > 0 then
         local found
         for i, comp in ipairs(results) do
             if comp == pinned then
@@ -1397,7 +1401,38 @@ local function accept_n_chars(n_chars)
             end
             update_preview(ctx)
         else
+            -- Fully consuming a suggestion frees its lock (derive_suggestions
+            -- ignores the now-empty remainder and re-locks to the next result),
+            -- so this is the one moment the "never change visible ghost text"
+            -- rule does not apply: nothing is visible. Reconsider the cache and
+            -- paint the next compatible completion here, synchronously in the
+            -- same event as the accept edit -- the post-accept CursorMovedI is
+            -- suppressed by skip_cursor_moved_after_accept, so without this the
+            -- follow-up ghost text would wait for the next keystroke.
             reset_ctx(ctx)
+            local cfg = require('minuet').config
+            if ctx.last_trigger_params and (should_auto_trigger() or ctx.last_trigger_was_manual) then
+                local context = vt_get_context(utils.make_cmp_context(), cfg)
+                local effective, choice, n_fresh = derive_suggestions(
+                    ctx,
+                    ctx.last_trigger_params,
+                    context.lines_before,
+                    context.lines_after,
+                    context.opts.is_incomplete_before,
+                    cfg
+                )
+                if #effective > 0 then
+                    ctx.suggestions = effective
+                    ctx.choice = choice
+                    ctx.shown_choices = ctx.shown_choices or {}
+                    update_preview(ctx)
+                end
+                -- Same top-up rule as on_cursor_moved_i: short of fresh
+                -- completions at the new state, kick a background fetch.
+                if n_fresh < (cfg.n_completions or 3) and should_auto_trigger() then
+                    schedule()
+                end
+            end
         end
         ctx.skip_cursor_moved_after_accept = {
             row = line + #lines,

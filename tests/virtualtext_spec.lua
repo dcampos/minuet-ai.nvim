@@ -2078,4 +2078,83 @@ return {
             helpers.delete_buffer(bufnr)
         end,
     },
+    {
+        -- A fully consumed suggestion frees its per-state lock. The accept
+        -- itself reconsiders the cache and paints the next compatible sibling
+        -- in the same synchronous event, and a later re-derive at the consumed
+        -- state must not pin an empty remainder over real completions (the
+        -- empty-ghost-with-(n/n) bug).
+        name = 'virtualtext full accept frees the lock and re-shows the next compatible completion',
+        run = function()
+            helpers.setup_root_config {
+                provider = 'test',
+                debounce = 0,
+                throttle = 0,
+                n_completions = 2,
+                virtualtext = {
+                    debounce = 0,
+                    throttle = 0,
+                    max_retries = 0,
+                },
+                provider_options = {
+                    test = { model = 'fixture-model', optional = {} },
+                },
+            }
+
+            local backend_calls = 0
+            package.loaded['minuet.backends.test'] = {
+                complete = function(_, callback)
+                    backend_calls = backend_calls + 1
+                    if backend_calls == 1 then
+                        callback { '1', '1 + 2' }
+                    else
+                        callback {}
+                    end
+                end,
+            }
+
+            local virtualtext = helpers.reload 'minuet.virtualtext'
+            virtualtext.setup()
+
+            local original_ve = vim.o.virtualedit
+            vim.o.virtualedit = 'onemore'
+            local bufnr = helpers.create_buffer({ 'x = ' }, { 1, 4 })
+            local original_mode = vim.fn.mode
+            vim.fn.mode = function()
+                return 'i'
+            end
+
+            virtualtext.action.fire()
+            helpers.expect_match(get_suggestion_text(bufnr, virtualtext.ns_id), '^1', 'top result shows and locks')
+
+            -- Accept the whole active suggestion ('1'). Its lock is spent; the
+            -- sibling's remainder must appear within the same accept event.
+            virtualtext.action.accept()
+            helpers.expect_equal(vim.api.nvim_buf_get_lines(bufnr, 0, -1, false), { 'x = 1' })
+            helpers.expect_equal(
+                get_suggestion_text(bufnr, virtualtext.ns_id),
+                ' + 2',
+                'the sibling remainder paints synchronously after the full accept'
+            )
+
+            -- Consume the sibling too: nothing compatible remains, so nothing
+            -- may be shown -- in particular not an empty pinned remainder.
+            virtualtext.action.accept()
+            helpers.expect_equal(vim.api.nvim_buf_get_lines(bufnr, 0, -1, false), { 'x = 1 + 2' })
+            helpers.expect_falsy(virtualtext.action.is_visible(), 'no ghost text after consuming everything')
+
+            -- Re-derive at the consumed state (backend now returns nothing):
+            -- the spent lock's empty remainder must not resurface as a ghost.
+            virtualtext.action.fire()
+            helpers.expect_falsy(
+                virtualtext.action.is_visible(),
+                'a spent lock must not pin an empty ghost text at the consumed state'
+            )
+
+            virtualtext.action.dismiss()
+            vim.fn.mode = original_mode
+            vim.o.virtualedit = original_ve
+            helpers.delete_buffer(bufnr)
+        end,
+    },
 }
