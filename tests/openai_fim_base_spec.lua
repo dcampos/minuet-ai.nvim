@@ -513,4 +513,117 @@ return {
             end
         end,
     },
+    {
+        -- A generation cut by the token limit (finish_reason == 'length') ends
+        -- in a truncated line. When the caller walks completions line by line
+        -- (context.opts.trim_incomplete_tail_line) that tail must be trimmed
+        -- before the result is delivered; other callers keep the raw text.
+        name = 'openai FIM backend trims the token-limit-truncated tail line when the context asks for it',
+        run = function()
+            local root = helpers.setup_root_config {
+                n_completions = 1,
+                request_timeout = 1,
+                curl_extra_args = {},
+                fim_filter_context = false,
+            }
+
+            local length_stdout = table.concat({
+                'data: {"choices":[{"delta":{"content":"foo"},"finish_reason":null}]}',
+                'data: {"choices":[{"delta":{"content":""},"finish_reason":"length"}]}',
+                'data: [DONE]',
+            }, '\n')
+            local stop_stdout = table.concat({
+                'data: {"choices":[{"delta":{"content":"foo"},"finish_reason":null}]}',
+                'data: {"choices":[{"delta":{"content":""},"finish_reason":"stop"}]}',
+                'data: [DONE]',
+            }, '\n')
+
+            local cases = {
+                { trim = true, stdout = length_stdout, decoded = 'foo\nbar_trunc', expected = 'foo' },
+                { trim = true, stdout = stop_stdout, decoded = 'foo\nbar', expected = 'foo\nbar' },
+                { trim = false, stdout = length_stdout, decoded = 'foo\nbar_trunc', expected = 'foo\nbar_trunc' },
+                -- Cut inside the first line: nothing complete remains.
+                { trim = true, stdout = length_stdout, decoded = 'trunc_only', expected = nil },
+            }
+
+            local base = helpers.reload 'minuet.backends.openai_base'
+            local common = require 'minuet.backends.common'
+            local utils = require 'minuet.utils'
+
+            local original_make_tmp_file = utils.make_tmp_file
+            local original_make_curl_args = utils.make_curl_args
+            local original_stream_decode = utils.stream_decode
+            local original_start_job = common.start_job
+            local original_terminate_all_jobs = common.terminate_all_jobs
+
+            local function restore()
+                utils.make_tmp_file = original_make_tmp_file
+                utils.make_curl_args = original_make_curl_args
+                utils.stream_decode = original_stream_decode
+                common.start_job = original_start_job
+                common.terminate_all_jobs = original_terminate_all_jobs
+            end
+
+            local ok, err = pcall(function()
+                for i, case in ipairs(cases) do
+                    utils.make_tmp_file = function()
+                        return '/tmp/minuet-fim-trim-' .. i .. '.json'
+                    end
+                    utils.make_curl_args = function(_, _, data_file)
+                        return { '-d', '@' .. data_file }
+                    end
+                    utils.stream_decode = function()
+                        return case.decoded
+                    end
+                    common.terminate_all_jobs = function() end
+                    common.start_job = function(_, _, handlers)
+                        local job = { pid = i }
+                        handlers.on_exit(job, { code = 0, stdout = case.stdout })
+                        return job
+                    end
+
+                    local received
+                    base.complete_openai_fim_base({
+                        name = 'Codestral',
+                        model = 'codestral-latest',
+                        end_point = 'https://example.test/v1/fim/completions',
+                        api_key = function()
+                            return 'test-key'
+                        end,
+                        stream = true,
+                        optional = {},
+                        transform = {},
+                        template = {
+                            prompt = function(before)
+                                return before
+                            end,
+                            suffix = function(_, after)
+                                return after
+                            end,
+                        },
+                    }, function(json)
+                        return json.choices[1].delta.content
+                    end, {
+                        lines_before = 'x = ',
+                        lines_after = '',
+                        opts = { trim_incomplete_tail_line = case.trim },
+                    }, function(items)
+                        received = items
+                    end, root.config)
+
+                    helpers.expect_equal(
+                        received[1],
+                        case.expected,
+                        ('case %d: trim=%s finish=%s'):format(i, tostring(case.trim), case.stdout:match '"finish_reason":"(%w+)"')
+                    )
+                end
+            end)
+
+            restore()
+
+            if not ok then
+                error(err, 0)
+            end
+        end,
+    },
 }

@@ -12,6 +12,33 @@ function M.openai_get_text_fn_stream(json)
     return json.choices[1].delta.content
 end
 
+--- Whether the server cut the generation at the token limit (finish_reason ==
+--- 'length'). Handles both a single non-streamed JSON body and an SSE stream
+--- (where the reason arrives on the final content chunk).
+---@param stdout string?
+---@return boolean
+local function hit_token_limit(stdout)
+    if type(stdout) ~= 'string' or stdout == '' then
+        return false
+    end
+    local ok, decoded = pcall(vim.json.decode, stdout)
+    if ok and type(decoded) == 'table' then
+        local choice = type(decoded.choices) == 'table' and decoded.choices[1]
+        return type(choice) == 'table' and choice.finish_reason == 'length'
+    end
+    for _, line in ipairs(vim.split(stdout, '\n', { plain = true })) do
+        line = line:gsub('^data:%s*', '')
+        local chunk_ok, chunk = pcall(vim.json.decode, line)
+        if chunk_ok and type(chunk) == 'table' and type(chunk.choices) == 'table' then
+            local choice = chunk.choices[1]
+            if type(choice) == 'table' and choice.finish_reason == 'length' then
+                return true
+            end
+        end
+    end
+    return false
+end
+
 local function prepare_fim_items(items, context, cfg)
     local filtered_items = items
     if cfg.fim_filter_context then
@@ -349,6 +376,15 @@ function M.complete_openai_fim_base(options, get_text_fn, context, callback, cfg
 
                 if options.strip_spurious_leading_newline then
                     result = utils.strip_codestral_spurious_newline(result, data.prompt, data.suffix)
+                end
+
+                -- Token-limit cut: everything after the last newline is a
+                -- truncated line. Callers walking completions line by line
+                -- (context.opts.trim_incomplete_tail_line) must never see it,
+                -- so drop it -- or the whole result when the cut landed inside
+                -- the first line.
+                if result and (context.opts or {}).trim_incomplete_tail_line and hit_token_limit(out.stdout) then
+                    result = result:match '^(.*)\n[^\n]*$'
                 end
 
                 finish_request(idx, result)

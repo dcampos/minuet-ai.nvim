@@ -823,6 +823,13 @@ local function trigger(bufnr, overrides, is_retry, is_manual)
     local max_display_lines = (cfg.virtualtext or {}).max_display_lines
     ctx.display_max_lines = type(max_display_lines) == 'number' and max_display_lines > 0 and max_display_lines or nil
 
+    -- Line-walking display: a completion the server cut at the token limit
+    -- ends in a truncated line, which the walk would eventually surface as if
+    -- it were a complete line completion. Ask the backend to trim that tail
+    -- before the result reaches the cache, so the pool only ever serves whole
+    -- lines. Uncapped (multi-line) triggers keep the raw completion.
+    context.opts.trim_incomplete_tail_line = ctx.display_max_lines ~= nil
+
     -- Show any already-cached suggestions immediately while the request is in
     -- flight (never block display on the request, even when a fresher / more
     -- context-rich response could still arrive).
