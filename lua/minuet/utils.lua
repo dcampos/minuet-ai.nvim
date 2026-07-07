@@ -475,8 +475,16 @@ function M.get_context(cmp_context, cfg, anchor)
     local before_prefix = collect_nearby_lines(bufnr, cursor.line, -1, fetch_chars)
     local after_suffix = collect_nearby_lines(bufnr, cursor.line + 1, 1, fetch_chars)
 
-    local raw_before = before_prefix .. '\n' .. cmp_context.cursor_before_line
-    local raw_after = cmp_context.cursor_after_line .. '\n' .. after_suffix
+    -- On row 1 there is no line above: joining with '\n' would inject a
+    -- newline that is not buffer content, making the prefix string diverge
+    -- from the one a row-2+ window produces for the same text (which breaks
+    -- the content-keyed virtualtext cache/locks across a multi-line accept
+    -- from the top of the buffer, and sends a spurious byte to the server).
+    local raw_before = cursor.line == 0 and cmp_context.cursor_before_line
+        or (before_prefix .. '\n' .. cmp_context.cursor_before_line)
+    local last_line = vim.api.nvim_buf_line_count(bufnr) - 1
+    local raw_after = cursor.line == last_line and cmp_context.cursor_after_line
+        or (cmp_context.cursor_after_line .. '\n' .. after_suffix)
 
     local n_chars_before = vim.fn.strchars(raw_before)
     local n_chars_after = vim.fn.strchars(raw_after)

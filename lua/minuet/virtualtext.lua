@@ -228,9 +228,9 @@ end
 --- current cursor) places it in a band: entries past `hard_limit` are dropped
 --- from the cyclable list entirely (kept in cache for a returning cursor);
 --- those within the bands are shown with the already-typed head stripped. The
---- second return is how many distinct results are *fresh* (typed_since <=
---- soft_limit) -- the count callers compare against n_completions to decide
---- whether to keep firing top-up requests.
+--- second return is how many distinct results are *fresh* (typed_since plus
+--- the entry's accept-slid chars <= soft_limit) -- the count callers compare
+--- against n_completions to decide whether to keep firing top-up requests.
 ---@param ctx minuet.VirtualtextSuggestionContext
 ---@param params table   output of extract_cache_params for the current request
 ---@param cur_before string  current lines_before
@@ -243,7 +243,7 @@ local function pool_suggestions(ctx, params, cur_before, cur_after, cur_incomple
     local results = {}
     local best_len = {} -- completion -> longest matching prefix length
     local order = {} -- completion -> first-seen index, for a stable tie-break
-    local min_drift = {} -- completion -> smallest typed_since seen (freshness)
+    local min_drift = {} -- completion -> smallest typed_since + slid_chars seen (freshness)
 
     -- Normalise a stop-token list so nil and {} compare equal.
     local function norm_stops(t)
@@ -280,6 +280,12 @@ local function pool_suggestions(ctx, params, cur_before, cur_after, cur_incomple
         if typed_since == nil or typed_since > hard_limit then
             goto continue
         end
+        -- Freshness counts the chars the entry was slid by accepts on top of
+        -- the typed drift: sliding keeps an entry canonical for display, but
+        -- its completions were generated from the pre-accept context, so a
+        -- walk past the soft band must stop counting them as fresh -- that is
+        -- what lets the accept-path top-up fire for fuller-context results.
+        local drift = typed_since + (entry.slid_chars or 0)
         -- The user must have typed exactly the head of a completion for its
         -- remainder to still apply; show only what is left untyped.
         local typed = cur_before:sub(#cur_before - typed_since + 1)
@@ -292,14 +298,14 @@ local function pool_suggestions(ctx, params, cur_before, cur_after, cur_incomple
                     if best_len[effective] == nil then
                         best_len[effective] = plen
                         order[effective] = #results + 1
-                        min_drift[effective] = typed_since
+                        min_drift[effective] = drift
                         table.insert(results, effective)
                     else
                         if plen > best_len[effective] then
                             best_len[effective] = plen
                         end
-                        if typed_since < min_drift[effective] then
-                            min_drift[effective] = typed_since
+                        if drift < min_drift[effective] then
+                            min_drift[effective] = drift
                         end
                     end
                 end
@@ -474,6 +480,8 @@ end
 ---@field lines_after string
 ---@field params table
 ---@field completions string[]
+---@field changedtick? integer buffer tick of the last accept-slide
+---@field slid_chars? integer chars the entry has been slid forward by accepts (freshness drift)
 
 ---@class minuet.VirtualtextSuggestionContext
 ---@field suggestions? string[]
@@ -1307,6 +1315,10 @@ local function slide_cache_after_accept(ctx, accepted)
             entry.lines_before = entry.lines_before .. accepted
             entry.completions = kept
             entry.changedtick = changedtick
+            -- The slide keeps the entry displayable, but its completions were
+            -- generated from the pre-accept context; the accumulated slide
+            -- counts as freshness drift in pool_suggestions.
+            entry.slid_chars = (entry.slid_chars or 0) + #accepted
         end
     end
 end
@@ -1407,6 +1419,15 @@ local function accept_n_chars(n_chars)
                 ctx.cur_before = ctx.cur_before .. to_insert
             end
             update_preview(ctx)
+            -- An accept advances the cursor without a usable CursorMovedI (the
+            -- post-accept event is suppressed), so the top-up must kick from
+            -- here: accepting a line typically slides the pool past the soft
+            -- band, where fuller-context completions are worth fetching before
+            -- the user consumes the rest. trigger() applies the per-state
+            -- budget, so this is a no-op while the state is still satisfied.
+            if should_auto_trigger() then
+                schedule()
+            end
         else
             -- Fully consuming a suggestion frees its lock (derive_suggestions
             -- ignores the now-empty remainder and re-locks to the next result),

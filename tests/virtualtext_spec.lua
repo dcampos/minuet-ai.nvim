@@ -2157,4 +2157,88 @@ return {
             helpers.delete_buffer(bufnr)
         end,
     },
+    {
+        -- Accept-walking must keep the request pipeline warm: sliding the
+        -- cache keeps the walked remainder displayable, but the slid chars
+        -- count as freshness drift, so once a walk crosses the soft band the
+        -- accept itself schedules a top-up (its own CursorMovedI is
+        -- suppressed, so nothing else would). The landing top-up must not
+        -- repaint over the walked remainder.
+        name = 'virtualtext accept-walk past the soft band fires a top-up and keeps the remainder shown',
+        run = function()
+            helpers.setup_root_config {
+                provider = 'test',
+                debounce = 0,
+                throttle = 0,
+                n_completions = 1,
+                virtualtext = {
+                    debounce = 0,
+                    throttle = 0,
+                    max_retries = 0,
+                    max_display_lines = 1,
+                    -- soft band: 20 chars of drift
+                    cache_soft_chars_ahead = 20,
+                },
+                provider_options = {
+                    test = { model = 'fixture-model', optional = {} },
+                },
+            }
+
+            local backend_calls = 0
+            local pending_callback
+            package.loaded['minuet.backends.test'] = {
+                complete = function(_, callback)
+                    backend_calls = backend_calls + 1
+                    if backend_calls == 1 then
+                        callback { 'abc\nBBBBBBBBBBBBBBBBBBBBB\ntail' }
+                    else
+                        pending_callback = callback
+                    end
+                end,
+            }
+
+            local virtualtext = helpers.reload 'minuet.virtualtext'
+            virtualtext.setup()
+
+            local original_ve = vim.o.virtualedit
+            vim.o.virtualedit = 'onemore'
+            local bufnr = helpers.create_buffer({ 'x = ' }, { 1, 4 })
+            vim.b.minuet_virtual_text_auto_trigger_mode = 'full'
+            local original_mode = vim.fn.mode
+            vim.fn.mode = function()
+                return 'i'
+            end
+
+            virtualtext.action.fire()
+            helpers.expect_equal(get_suggestion_text(bufnr, virtualtext.ns_id), 'abc', 'first line renders')
+            helpers.expect_equal(backend_calls, 1)
+
+            -- First accept slides the entry 3 chars: still inside the soft
+            -- band, so the state stays satisfied and no request fires.
+            virtualtext.action.accept()
+            helpers.expect_match(get_suggestion_text(bufnr, virtualtext.ns_id), '^\nBBB')
+            helpers.expect_equal(backend_calls, 1, 'inside the soft band the walk stays satisfied')
+
+            -- Second accept slides 22 more chars, past the soft band: the
+            -- walked remainder is no longer fresh, so the accept schedules a
+            -- top-up request at the new state.
+            virtualtext.action.accept()
+            helpers.expect_match(get_suggestion_text(bufnr, virtualtext.ns_id), '^\ntail')
+            helpers.expect_equal(backend_calls, 2, 'crossing the soft band fires a top-up')
+
+            -- The top-up lands: it joins the cyclable list but must not
+            -- repaint over the walked remainder the user is looking at.
+            pending_callback({ 'fresher' }, true)
+            helpers.expect_match(
+                get_suggestion_text(bufnr, virtualtext.ns_id),
+                '^\ntail',
+                'the walked remainder stays the active suggestion'
+            )
+
+            virtualtext.action.dismiss()
+            vim.fn.mode = original_mode
+            vim.o.virtualedit = original_ve
+            helpers.delete_buffer(bufnr)
+        end,
+    },
 }
