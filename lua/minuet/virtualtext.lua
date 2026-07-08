@@ -215,6 +215,50 @@ local function extract_cache_params(cfg)
     }
 end
 
+--- Index of the last display line to keep when at most `max_lines` content
+--- lines (lines with non-whitespace) may be shown, or nil when nothing needs
+--- hiding. Blank lines before the cut are kept: after a line-accept the
+--- remainder starts with '\n', and the one line worth showing is the next
+--- content line, a single virt_line below the cursor.
+---@param display_lines string[] suggestion split on '\n'
+---@param max_lines integer? nil disables truncation
+---@return integer? cut last display-line index to keep, nil when nothing is hidden
+local function display_cut(display_lines, max_lines)
+    if not max_lines or max_lines <= 0 or #display_lines <= max_lines then
+        return nil
+    end
+    local content = 0
+    for i, line in ipairs(display_lines) do
+        if line:find '%S' then
+            content = content + 1
+            if content >= max_lines then
+                return i < #display_lines and i or nil
+            end
+        end
+    end
+    return nil
+end
+
+--- The rendered portion of a completion under the display cap: the display
+--- lines up to display_cut, or the whole completion when nothing is hidden or
+--- no cap is active. Two completions with equal visible keys paint identical
+--- ghost text, so pooling, lock matching, cycling and the (x/y) counter all
+--- treat them as one alternative.
+---@param completion string
+---@param max_lines integer? the family's display cap (ctx.display_max_lines)
+---@return string
+local function visible_key(completion, max_lines)
+    if not max_lines then
+        return completion
+    end
+    local lines = vim.split(completion, '\n', { plain = true })
+    local cut = display_cut(lines, max_lines)
+    if not cut then
+        return completion
+    end
+    return table.concat(vim.list_slice(lines, 1, cut), '\n')
+end
+
 --- Derive the compatible completions for the current buffer state from
 --- ctx.cache, ranked by how much backward prefix context they matched (longer
 --- is better: more context means the completion is more likely the genuine
@@ -231,6 +275,14 @@ end
 --- second return is how many distinct results are *fresh* (typed_since plus
 --- the entry's accept-slid chars <= soft_limit) -- the count callers compare
 --- against n_completions to decide whether to keep firing top-up requests.
+---
+--- Distinctness is judged on the *rendered* portion (visible_key): with a
+--- display cap active, completions that only differ past the display cut
+--- paint identical ghost text, so they collapse into one cyclable entry --
+--- the (x/y) counter only ever promises visibly different alternatives. A
+--- collapsed group is represented by its most-context member's full text
+--- (that hidden tail is the likeliest genuine continuation, and it is what an
+--- accept-walk consumes) and counts as fresh via its freshest member.
 ---@param ctx minuet.VirtualtextSuggestionContext
 ---@param params table   output of extract_cache_params for the current request
 ---@param cur_before string  current lines_before
@@ -240,10 +292,12 @@ end
 ---@param hard_limit integer soft/hidden boundary
 ---@return string[] results, integer n_fresh
 local function pool_suggestions(ctx, params, cur_before, cur_after, cur_incomplete_before, soft_limit, hard_limit)
-    local results = {}
-    local best_len = {} -- completion -> longest matching prefix length
-    local order = {} -- completion -> first-seen index, for a stable tie-break
-    local min_drift = {} -- completion -> smallest typed_since + slid_chars seen (freshness)
+    local max_lines = ctx.display_max_lines
+    -- One group per distinct visible key. plen (longest matching prefix seen)
+    -- ranks the list, order is a stable first-seen tie-break, drift the
+    -- smallest typed_since + slid_chars seen (freshness).
+    local groups = {} ---@type table<string, { comp: string, plen: integer, order: integer, drift: integer }>
+    local list = {}
 
     -- Normalise a stop-token list so nil and {} compare equal.
     local function norm_stops(t)
@@ -295,17 +349,21 @@ local function pool_suggestions(ctx, params, cur_before, cur_after, cur_incomple
             if comp:sub(1, typed_since) == typed then
                 local effective = truncate_at_stop_tokens(comp:sub(typed_since + 1), entry.params.stop_tokens)
                 if #effective > 0 then
-                    if best_len[effective] == nil then
-                        best_len[effective] = plen
-                        order[effective] = #results + 1
-                        min_drift[effective] = drift
-                        table.insert(results, effective)
+                    local key = visible_key(effective, max_lines)
+                    local group = groups[key]
+                    if not group then
+                        group = { comp = effective, plen = plen, order = #list + 1, drift = drift }
+                        groups[key] = group
+                        table.insert(list, group)
                     else
-                        if plen > best_len[effective] then
-                            best_len[effective] = plen
+                        -- A fuller-context member donates its (invisible past
+                        -- the cut) tail along with the rank.
+                        if plen > group.plen then
+                            group.comp = effective
+                            group.plen = plen
                         end
-                        if drift < min_drift[effective] then
-                            min_drift[effective] = drift
+                        if drift < group.drift then
+                            group.drift = drift
                         end
                     end
                 end
@@ -315,45 +373,23 @@ local function pool_suggestions(ctx, params, cur_before, cur_after, cur_incomple
         ::continue::
     end
 
-    table.sort(results, function(a, b)
-        if best_len[a] ~= best_len[b] then
-            return best_len[a] > best_len[b]
+    table.sort(list, function(a, b)
+        if a.plen ~= b.plen then
+            return a.plen > b.plen
         end
-        return order[a] < order[b]
+        return a.order < b.order
     end)
 
+    local results = {}
     local n_fresh = 0
-    for _, r in ipairs(results) do
-        if min_drift[r] <= soft_limit then
+    for _, group in ipairs(list) do
+        table.insert(results, group.comp)
+        if group.drift <= soft_limit then
             n_fresh = n_fresh + 1
         end
     end
 
     return results, n_fresh
-end
-
---- Index of the last display line to keep when at most `max_lines` content
---- lines (lines with non-whitespace) may be shown, or nil when nothing needs
---- hiding. Blank lines before the cut are kept: after a line-accept the
---- remainder starts with '\n', and the one line worth showing is the next
---- content line, a single virt_line below the cursor.
----@param display_lines string[] suggestion split on '\n'
----@param max_lines integer? nil disables truncation
----@return integer? cut last display-line index to keep, nil when nothing is hidden
-local function display_cut(display_lines, max_lines)
-    if not max_lines or max_lines <= 0 or #display_lines <= max_lines then
-        return nil
-    end
-    local content = 0
-    for i, line in ipairs(display_lines) do
-        if line:find '%S' then
-            content = content + 1
-            if content >= max_lines then
-                return i < #display_lines and i or nil
-            end
-        end
-    end
-    return nil
 end
 
 local MAX_LOCKS = 8
@@ -423,6 +459,9 @@ end
 --- returning to that state re-shows it. It also overrides the hard band: a
 --- locked completion the user has slid/typed past the hard limit is kept in the
 --- list (appended) so it stays visible, where an unlocked one would be hidden.
+--- The lock pins a *visible* choice: it matches the pooled results by rendered
+--- portion, so under a display cap the group representative (whose hidden tail
+--- may carry fuller context than the lock captured) fills the slot.
 --- Otherwise the natural ranking (longest prefix / most context first) decides,
 --- and the top result becomes the new lock for this state.
 --- Records the current state on ctx so a later cycle can re-lock against it.
@@ -451,9 +490,10 @@ local function derive_suggestions(ctx, params, cur_before, cur_after, cur_incomp
     -- ghost text. Fall through to the natural ranking instead, whose set_lock
     -- re-locks this state to the next result, replacing the spent lock.
     if pinned ~= nil and #pinned > 0 then
+        local pinned_key = visible_key(pinned, ctx.display_max_lines)
         local found
         for i, comp in ipairs(results) do
-            if comp == pinned then
+            if visible_key(comp, ctx.display_max_lines) == pinned_key then
                 found = i
                 break
             end
@@ -504,7 +544,7 @@ end
 ---@field fetched_this_state? boolean whether a non-retry request already fired at the current top-up state
 ---@field distinct_active? boolean a fetch for a not-yet-seen completion is in flight
 ---@field distinct_silent? boolean the in-flight distinct fetch is a preemptive tail prefetch (no dots, no cycle)
----@field distinct_seen? table<string, true> completions already seen when the distinct fetch started
+---@field distinct_seen? table<string, true> visible keys of the completions already seen when the distinct fetch started
 ---@field distinct_attempts? integer requests fired so far for the current distinct fetch
 ---@field skip_cursor_moved_after_accept? { row: integer, col: integer, changedtick: integer } cursor event caused by accept
 
@@ -1056,7 +1096,7 @@ local function trigger(bufnr, overrides, is_retry, is_manual)
         if ctx.distinct_active then
             local picked
             for i, comp in ipairs(effective) do
-                if not ctx.distinct_seen[comp] then
+                if not ctx.distinct_seen[visible_key(comp, ctx.display_max_lines)] then
                     picked = i
                     break
                 end
@@ -1149,9 +1189,12 @@ local function start_distinct_fetch(ctx, overrides, silent)
         end
         return
     end
+    -- Seen-ness is judged on the rendered portion, like the pool: a fetch that
+    -- only differs past the display cut would paint the exact same ghost text,
+    -- so it must not count as the distinct completion the user asked for.
     ctx.distinct_seen = {}
     for _, s in ipairs(ctx.suggestions or {}) do
-        ctx.distinct_seen[s] = true
+        ctx.distinct_seen[visible_key(s, ctx.display_max_lines)] = true
     end
     ctx.distinct_active = true
     ctx.distinct_silent = silent or nil

@@ -265,7 +265,10 @@ local M = {
         -- not cost first-paint latency. Per-trigger overridable; a manual
         -- multi-line keymap lifts the cap for its own request family with
         --   action.next { virtualtext = { max_display_lines = false } }
-        -- nil/false renders everything (default).
+        -- With a cap active, completions that only differ past the display cut
+        -- render the same ghost text and collapse into one cyclable entry, so
+        -- the (x/y) counter and next/prev only ever offer visibly different
+        -- alternatives. nil/false renders everything (default).
         max_display_lines = nil,
         -- Maximum number of response pool entries kept per buffer. The pool is
         -- the local cache of past completions; a larger pool lets us recognise
@@ -278,7 +281,8 @@ local M = {
         -- still-valid prefix+suffix pair instead of paying for a cold re-anchor.
         max_anchors = 8,
         -- Maximum automatic retry triggers fired per session when the pool
-        -- yields fewer than n_completions effective suggestions. Each retry
+        -- yields fewer than n_completions effective (visibly distinct
+        -- and fresh) suggestions. Each retry
         -- re-fires up to n_completions requests in the background (it does not
         -- block the already-shown suggestion), so a higher cap mostly costs
         -- extra requests at low-entropy positions where a distinct second

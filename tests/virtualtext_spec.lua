@@ -1953,6 +1953,142 @@ return {
         end,
     },
     {
+        -- Completions that only differ past the display cut render the same
+        -- ghost text, so they collapse into one cyclable entry: no (1/2) whose
+        -- alternatives all look identical. The hidden sibling tail is not
+        -- lost -- once the shared line is accepted, the tails diverge into
+        -- genuinely distinct entries again.
+        name = 'virtualtext display cap collapses completions that render identically',
+        run = function()
+            helpers.setup_root_config {
+                provider = 'test',
+                debounce = 0,
+                throttle = 0,
+                n_completions = 1,
+                virtualtext = {
+                    debounce = 0,
+                    throttle = 0,
+                    max_retries = 0,
+                    max_display_lines = 1,
+                },
+                provider_options = {
+                    test = { model = 'fixture-model', optional = {} },
+                },
+            }
+
+            local backend_calls = 0
+            package.loaded['minuet.backends.test'] = {
+                complete = function(_, callback)
+                    backend_calls = backend_calls + 1
+                    if backend_calls == 1 then
+                        callback { '1\ny = 2', '1\nz = 3' }
+                    else
+                        callback {}
+                    end
+                end,
+            }
+
+            local virtualtext = helpers.reload 'minuet.virtualtext'
+            virtualtext.setup()
+
+            local original_ve = vim.o.virtualedit
+            vim.o.virtualedit = 'onemore'
+            local bufnr = helpers.create_buffer({ 'x = ' }, { 1, 4 })
+            local original_mode = vim.fn.mode
+            vim.fn.mode = function()
+                return 'i'
+            end
+
+            virtualtext.action.fire()
+            helpers.expect_equal(
+                get_suggestion_text(bufnr, virtualtext.ns_id),
+                '1',
+                'identical visible portions collapse into one entry, so no counter shows'
+            )
+
+            -- Accepting the shared line surfaces the divergent tails as real,
+            -- visibly distinct alternatives.
+            virtualtext.action.accept()
+            helpers.expect_equal(vim.api.nvim_buf_get_lines(bufnr, 0, -1, false), { 'x = 1' })
+            helpers.expect_equal(get_suggestion_text(bufnr, virtualtext.ns_id), '\ny = 2')
+
+            virtualtext.action.next()
+            helpers.expect_equal(
+                get_suggestion_text(bufnr, virtualtext.ns_id),
+                '\nz = 3 (2/2)',
+                'the sibling tail cycles in as a distinct entry after the accept'
+            )
+
+            virtualtext.action.dismiss()
+            vim.fn.mode = original_mode
+            vim.o.virtualedit = original_ve
+            helpers.delete_buffer(bufnr)
+        end,
+    },
+    {
+        -- A distinct fetch judges "seen" on the rendered portion too: a fetched
+        -- completion that only differs past the display cut would paint the
+        -- exact same ghost text the user cycled away from, so it must not be
+        -- cycled to -- the fetch keeps retrying and eventually gives up in
+        -- place.
+        name = 'virtualtext distinct fetch skips completions that only differ past the display cut',
+        run = function()
+            helpers.setup_root_config {
+                provider = 'test',
+                debounce = 0,
+                throttle = 0,
+                n_completions = 1,
+                virtualtext = {
+                    debounce = 0,
+                    throttle = 0,
+                    max_retries = 2,
+                    max_display_lines = 1,
+                },
+                provider_options = {
+                    test = { model = 'fixture-model', optional = {} },
+                },
+            }
+
+            local real_utils = require 'minuet.utils'
+            local current = { lines_before = 'S', lines_after = '', opts = {} }
+            package.loaded['minuet.utils'] = setmetatable({
+                get_context = function()
+                    return current
+                end,
+            }, { __index = real_utils })
+
+            local backend_calls = 0
+            package.loaded['minuet.backends.test'] = {
+                complete = function(_, callback)
+                    backend_calls = backend_calls + 1
+                    callback { 'AA\ntail-' .. backend_calls }
+                end,
+            }
+
+            local virtualtext = helpers.reload 'minuet.virtualtext'
+            virtualtext.setup()
+
+            local bufnr = helpers.create_buffer({ 'x' }, { 1, 1 })
+            local original_mode = vim.fn.mode
+            vim.fn.mode = function()
+                return 'i'
+            end
+
+            virtualtext.action.fire()
+            helpers.expect_equal(get_suggestion_text(bufnr, virtualtext.ns_id), 'AA')
+
+            virtualtext.action.next()
+            local shown = get_suggestion_text(bufnr, virtualtext.ns_id)
+            helpers.expect_equal(shown, 'AA', 'a same-looking fetch never cycles in')
+            helpers.expect_equal(backend_calls, 3, 'the fetch retried up to the budget before giving up')
+
+            virtualtext.action.dismiss()
+            package.loaded['minuet.utils'] = real_utils
+            vim.fn.mode = original_mode
+            helpers.delete_buffer(bufnr)
+        end,
+    },
+    {
         -- A manual multi-line keymap lifts the cap for its own request family
         -- (virtualtext = { max_display_lines = false }), keeping the classic
         -- full multi-line ghost text.
