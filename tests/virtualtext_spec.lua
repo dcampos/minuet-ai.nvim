@@ -497,6 +497,77 @@ return {
         end,
     },
     {
+        name = 'virtualtext hand typing uses the anchored cache in a long document',
+        run = function()
+            helpers.setup_root_config {
+                provider = 'test',
+                debounce = 0,
+                throttle = 0,
+                n_completions = 1,
+                virtualtext = {
+                    max_retries = 0,
+                    auto_trigger_mode = 'full',
+                    context_before_chars = 20,
+                    context_after_chars = 20,
+                    context_growth_slack = 100,
+                },
+                provider_options = {
+                    test = { model = 'fixture-model', optional = {} },
+                },
+            }
+
+            local backend_calls = 0
+            package.loaded['minuet.backends.test'] = {
+                complete = function(_, callback)
+                    backend_calls = backend_calls + 1
+                    callback { 'abc' }
+                end,
+            }
+
+            local virtualtext = helpers.reload 'minuet.virtualtext'
+            virtualtext.setup()
+
+            -- The prefix is longer than its 20-character budget, so a fresh
+            -- lookup window would slide after every character. Keep real text
+            -- after the cursor too: suffix emptiness is unrelated to this bug.
+            local bufnr = helpers.create_buffer({ string.rep('p', 100) .. 'SUFFIX' }, { 1, 100 })
+            vim.b.minuet_virtual_text_auto_trigger_mode = 'full'
+            local original_mode = vim.fn.mode
+            vim.fn.mode = function()
+                return 'i'
+            end
+
+            virtualtext.action.fire()
+            helpers.expect_equal(backend_calls, 1)
+            helpers.expect_match(get_suggestion_text(bufnr, virtualtext.ns_id), '^abc')
+
+            -- Type the first suggested character by hand. The cache lookup must
+            -- grow from the same anchor as the request and show the remainder;
+            -- a fresh sliding lookup would miss and make a second backend call.
+            vim.api.nvim_buf_set_text(bufnr, 0, 100, 0, 100, { 'a' })
+            vim.api.nvim_win_set_cursor(0, { 1, 101 })
+            vim.api.nvim_exec_autocmds('CursorMovedI', { buffer = bufnr })
+
+            helpers.expect_equal(
+                get_suggestion_text(bufnr, virtualtext.ns_id),
+                'bc',
+                'matching hand-typed text keeps the anchored remainder visible'
+            )
+            helpers.expect_equal(backend_calls, 1, 'matching hand-typed text must not refetch')
+
+            vim.api.nvim_buf_set_text(bufnr, 0, 101, 0, 101, { 'b' })
+            vim.api.nvim_win_set_cursor(0, { 1, 102 })
+            vim.api.nvim_exec_autocmds('CursorMovedI', { buffer = bufnr })
+
+            helpers.expect_equal(get_suggestion_text(bufnr, virtualtext.ns_id), 'c')
+            helpers.expect_equal(backend_calls, 1, 'successive matching characters stay on the same cache entry')
+
+            virtualtext.action.dismiss()
+            vim.fn.mode = original_mode
+            helpers.delete_buffer(bufnr)
+        end,
+    },
+    {
         name = 'virtualtext cycling locks a choice that re-shows on returning to the state',
         run = function()
             helpers.setup_root_config {

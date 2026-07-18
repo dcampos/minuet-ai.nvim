@@ -756,6 +756,58 @@ local function vt_get_context(cmp_context, cfg, anchor)
     return utils.get_context(cmp_context, sizing_cfg(cfg), anchor)
 end
 
+--- Resolve the live context against the same prefix-anchor ring used for
+--- requests. This is also used by cache lookups: once a long document fills
+--- the prefix budget, a fresh window slides by one character per keystroke,
+--- while the request window grows from its fixed anchor. Comparing those two
+--- shapes makes matching hand-typed completion text look like a cache miss.
+---@param cmp_context table
+---@param cfg table
+---@param ctx minuet.VirtualtextSuggestionContext
+---@param params table
+---@return table
+local function resolve_context(cmp_context, cfg, ctx, params)
+    local vt_cfg = cfg.virtualtext or {}
+    local growth_slack = vt_cfg.context_growth_slack or 0
+    local divergence_slack = vt_cfg.context_divergence_slack or growth_slack
+    local anchor_floor = vt_cfg.context_before_chars
+
+    local context
+    if math.max(growth_slack, divergence_slack) > 0 and ctx.anchors then
+        for i = #ctx.anchors, 1, -1 do
+            local snap = ctx.anchors[i]
+            if vim.deep_equal(snap.params, params) then
+                local cand = vt_get_context(cmp_context, cfg, {
+                    prev_lines_before = snap.lines_before,
+                    prev_lines_after = snap.lines_after,
+                    growth_slack = growth_slack,
+                    divergence_slack = divergence_slack,
+                    floor = snap.is_incomplete_before and type(anchor_floor) == 'number' and anchor_floor or nil,
+                })
+                if cand.opts.anchored then
+                    context = cand
+                    break
+                end
+            end
+        end
+    end
+    if not context then
+        context = vt_get_context(cmp_context, cfg)
+    end
+
+    -- Keep the suffix cap identical for request and lookup contexts too.
+    local after_opt = vt_cfg.context_after_chars
+    if type(after_opt) == 'number' and after_opt >= 0 then
+        local full_after = context.lines_after
+        if vim.fn.strchars(full_after) > after_opt then
+            context.lines_after = vim.fn.strcharpart(full_after, 0, after_opt)
+            context.opts.is_incomplete_after = true
+        end
+    end
+
+    return context
+end
+
 ---@param bufnr integer
 ---@param overrides? table Optional partial config patch, deep-merged onto the
 ---live config for this single request (no global mutation). Use to fire with a
@@ -807,50 +859,8 @@ local function trigger(bufnr, overrides, is_retry, is_manual)
     -- that is still buffer-valid. The ring is only searched past its newest
     -- entry when that newest one fails to anchor, i.e. on a snap, not on every
     -- keystroke.
-    local vt_cfg = cfg.virtualtext or {}
-    local growth_slack = vt_cfg.context_growth_slack or 0
-    local divergence_slack = vt_cfg.context_divergence_slack or growth_slack
-    -- Backward reuse floor: a rewound cursor can keep reusing a truncated
-    -- anchor while the prefix it would send stays at least this many chars.
-    -- Equals the prefix floor (context_before_chars); the pinned request is
-    -- back_slack chars larger, and that difference is the backward headroom.
-    local anchor_floor = vt_cfg.context_before_chars
     local cmp_context = utils.make_cmp_context()
-
-    local context
-    if math.max(growth_slack, divergence_slack) > 0 and ctx.anchors then
-        for i = #ctx.anchors, 1, -1 do
-            local snap = ctx.anchors[i]
-            if vim.deep_equal(snap.params, params) then
-                local cand = vt_get_context(cmp_context, cfg, {
-                    prev_lines_before = snap.lines_before,
-                    prev_lines_after = snap.lines_after,
-                    growth_slack = growth_slack,
-                    divergence_slack = divergence_slack,
-                    floor = snap.is_incomplete_before and type(anchor_floor) == 'number' and anchor_floor or nil,
-                })
-                if cand.opts.anchored then
-                    context = cand
-                    break
-                end
-            end
-        end
-    end
-    if not context then
-        context = vt_get_context(cmp_context, cfg)
-    end
-    -- Bound the suffix independently of the prefix. A constant cap only: the
-    -- suffix must stay byte-stable across requests or a changed suffix
-    -- cold-busts the server cache (SPM). A prefix-dependent budget would resize
-    -- the suffix as the prefix grows and self-bust every keystroke.
-    local after_opt = (cfg.virtualtext or {}).context_after_chars
-    if type(after_opt) == 'number' and after_opt >= 0 then
-        local full_after = context.lines_after
-        if vim.fn.strchars(full_after) > after_opt then
-            context.lines_after = vim.fn.strcharpart(full_after, 0, after_opt)
-            context.opts.is_incomplete_after = true
-        end
-    end
+    local context = resolve_context(cmp_context, cfg, ctx, params)
     -- Virtual text fires one request per keystroke that misses the cache and
     -- lets them run concurrently, so the backend must NOT terminate the jobs of
     -- earlier in-flight requests: any of them may still return a completion that
@@ -1794,7 +1804,7 @@ function autocmd.on_cursor_moved_i()
     -- them, without contaminating or being contaminated by the default cache.
     if can_show_cache and ctx.last_trigger_params then
         local cfg = require('minuet').config
-        local context = vt_get_context(utils.make_cmp_context(), cfg)
+        local context = resolve_context(utils.make_cmp_context(), cfg, ctx, ctx.last_trigger_params)
         local effective, choice, n_fresh = derive_suggestions(
             ctx,
             ctx.last_trigger_params,
