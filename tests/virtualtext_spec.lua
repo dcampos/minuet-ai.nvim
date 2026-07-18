@@ -568,6 +568,70 @@ return {
         end,
     },
     {
+        name = 'virtualtext hand typing uses the anchored cache at EOF',
+        run = function()
+            helpers.setup_root_config {
+                provider = 'test',
+                debounce = 0,
+                throttle = 0,
+                n_completions = 1,
+                virtualtext = {
+                    max_retries = 0,
+                    auto_trigger_mode = 'full',
+                    context_before_chars = 20,
+                    context_after_chars = 20,
+                    context_growth_slack = 100,
+                },
+                provider_options = {
+                    test = { model = 'fixture-model', optional = {} },
+                },
+            }
+
+            local backend_calls = 0
+            package.loaded['minuet.backends.test'] = {
+                complete = function(_, callback)
+                    backend_calls = backend_calls + 1
+                    callback { 'abc' }
+                end,
+            }
+
+            local virtualtext = helpers.reload 'minuet.virtualtext'
+            virtualtext.setup()
+
+            local original_ve = vim.o.virtualedit
+            vim.o.virtualedit = 'onemore'
+            local bufnr = helpers.create_buffer({ string.rep('p', 100) }, { 1, 100 })
+            vim.b.minuet_virtual_text_auto_trigger_mode = 'full'
+            local original_mode = vim.fn.mode
+            vim.fn.mode = function()
+                return 'i'
+            end
+
+            virtualtext.action.fire()
+            helpers.expect_equal(backend_calls, 1)
+            helpers.expect_match(get_suggestion_text(bufnr, virtualtext.ns_id), '^abc')
+
+            vim.api.nvim_buf_set_text(bufnr, 0, 100, 0, 100, { 'a' })
+            vim.api.nvim_win_set_cursor(0, { 1, 101 })
+            vim.api.nvim_exec_autocmds('CursorMovedI', { buffer = bufnr })
+
+            helpers.expect_equal(get_suggestion_text(bufnr, virtualtext.ns_id), 'bc')
+            helpers.expect_equal(backend_calls, 1, 'matching hand-typed text at EOF must not refetch')
+
+            vim.api.nvim_buf_set_text(bufnr, 0, 101, 0, 101, { 'b' })
+            vim.api.nvim_win_set_cursor(0, { 1, 102 })
+            vim.api.nvim_exec_autocmds('CursorMovedI', { buffer = bufnr })
+
+            helpers.expect_equal(get_suggestion_text(bufnr, virtualtext.ns_id), 'c')
+            helpers.expect_equal(backend_calls, 1, 'successive EOF characters stay on the same cache entry')
+
+            virtualtext.action.dismiss()
+            vim.fn.mode = original_mode
+            vim.o.virtualedit = original_ve
+            helpers.delete_buffer(bufnr)
+        end,
+    },
+    {
         name = 'virtualtext cycling locks a choice that re-shows on returning to the state',
         run = function()
             helpers.setup_root_config {

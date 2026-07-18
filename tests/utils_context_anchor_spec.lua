@@ -110,6 +110,52 @@ return {
     },
 
     {
+        name = 'utils.get_context grows an anchor with an empty suffix at EOF',
+        run = function()
+            helpers.setup_root_config {
+                context_window = 100,
+                context_ratio = 0.5,
+            }
+            local utils = helpers.reload 'minuet.utils'
+            local original_ve = vim.o.virtualedit
+            vim.o.virtualedit = 'onemore'
+            local bufnr = helpers.create_buffer({ chars_of(200, 'a') }, { 1, 200 })
+
+            local baseline = utils.get_context(utils.make_cmp_context())
+            helpers.expect_equal(vim.fn.strchars(baseline.lines_before), 100)
+            helpers.expect_equal(baseline.lines_after, '')
+            helpers.expect_truthy(baseline.opts.is_incomplete_before)
+
+            vim.api.nvim_buf_set_text(bufnr, 0, 200, 0, 200, { 'NEWTEXT8' })
+            vim.api.nvim_win_set_cursor(0, { 1, 208 })
+
+            local context = utils.get_context(utils.make_cmp_context(), nil, {
+                prev_lines_before = baseline.lines_before,
+                prev_lines_after = baseline.lines_after,
+                growth_slack = 1024,
+            })
+
+            helpers.expect_truthy(context.opts.anchored, 'an empty EOF suffix is a valid stable anchor')
+            helpers.expect_equal(vim.fn.strchars(context.lines_before), 108)
+            helpers.expect_equal(context.lines_before:sub(-8), 'NEWTEXT8')
+            helpers.expect_equal(context.lines_after, '')
+
+            -- Moving away from EOF creates real right context. The old empty
+            -- suffix no longer matches and must fail the hard suffix gate.
+            vim.api.nvim_win_set_cursor(0, { 1, 150 })
+            local moved = utils.get_context(utils.make_cmp_context(), nil, {
+                prev_lines_before = baseline.lines_before,
+                prev_lines_after = baseline.lines_after,
+                growth_slack = 1024,
+            })
+            helpers.expect_falsy(moved.opts.anchored, 'an empty suffix anchor is valid only while still at EOF')
+
+            vim.o.virtualedit = original_ve
+            helpers.delete_buffer(bufnr)
+        end,
+    },
+
+    {
         name = 'utils.get_context falls back to the fresh window when growth exceeds slack',
         run = function()
             local bufnr, utils = setup_long_buffer(200, 200, {

@@ -420,8 +420,14 @@ end
 ---@param prev_suf string lines_after from the previous request
 ---@return string?
 local function pin_suffix_anchor(raw_after, prev_suf)
-    if type(prev_suf) ~= 'string' or prev_suf == '' then
+    if type(prev_suf) ~= 'string' then
         return nil
+    end
+    -- Empty is the exact, stable suffix at end of file. Lua treats '' as
+    -- truthy, so returning it still cleanly distinguishes a valid EOF anchor
+    -- from nil (suffix mismatch).
+    if prev_suf == '' then
+        return raw_after == '' and '' or nil
     end
     if #prev_suf > #raw_after then
         return nil
